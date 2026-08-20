@@ -76,6 +76,7 @@ The runtime check is what stops a static shell from passing. An export serves it
 - `--timeout SECONDS` (default 180): how long the app gets to render, and the budget for loading the page. A cold pyodide boot loads tens of megabytes of wasm, so the default is generous; a warm CI cache usually finishes in seconds.
 - `--expect SELECTOR` (repeatable): CSS selectors that must be visible, replacing the default at-least-one-rendered-output condition. For apps whose UI is inputs only, or when "booted" means something specific: `--expect "#sales" --expect ".value-box"`. The runtime check still applies, and the selectors must be satisfied at the same moment, not one at a time.
 - `--screenshot PATH`: write a full-page screenshot when the check fails, for the CI artifact that shows what the visitor would have seen.
+- `--fail-on-resource-error`: also fail when the browser could not load a resource. Off by default, because a missing sourcemap, a stale cache-busted webfont or an image nobody deployed is not the app being broken, and a check that reddens CI for one is a check a team learns to ignore. Failed loads are reported either way, as `resource_errors`.
 - `--port PORT`: serve a directory target on a fixed port instead of an ephemeral one, for exports that reference themselves by absolute URL.
 - `-o, --output auto|text|json` (default `auto`): the verdict format on stdout. `auto` emits JSON when stdout is not a TTY, the human-readable form otherwise.
 
@@ -136,6 +137,8 @@ $ shinylive-check site | jq .
   "errors_total": 0,
   "output_errors": [],
   "output_errors_total": 0,
+  "resource_errors": [],
+  "resource_errors_total": 0,
   "expects": [],
   "failure": null,
   "screenshot": null
@@ -144,7 +147,7 @@ $ shinylive-check site | jq .
 
 The two lists are what the page said, and a page can say a great deal: long messages are truncated and each list is clipped to the earliest 50 entries, with a marker naming what was dropped. `errors_total` and `output_errors_total` are the numbers that actually occurred, so read those for a count and never `len(errors)`.
 
-`failure` is `null` on a pass and one of `error`, `output-error`, `timeout`, `navigation` or `http-status` otherwise. Exit code 1 is a declared outcome, not an error: the check ran and the verdict is on stdout, like `grep` finding nothing. Real errors (a wrong invocation, a missing browser, an internal failure) go to stderr as a one-line JSON envelope, `{"error": {"kind": ..., "message": ..., "hint": ...}}`, when the output format is JSON.
+`failure` is `null` on a pass and one of `error`, `output-error`, `resource-error`, `timeout`, `navigation` or `http-status` otherwise. Exit code 1 is a declared outcome, not an error: the check ran and the verdict is on stdout, like `grep` finding nothing. Real errors (a wrong invocation, a missing browser, an internal failure) go to stderr as a one-line JSON envelope, `{"error": {"kind": ..., "message": ..., "hint": ...}}`, when the output format is JSON.
 
 `shinylive-check schema` prints the whole contract, commands, arguments, output fields, error kinds and exit codes, as machine-readable JSON in [The CLI Spec](https://clispec.dev) v0.3 dialect.
 
@@ -152,6 +155,7 @@ The two lists are what the page said, and a page can say a great deal: long mess
 
 - A directory target is served on `127.0.0.1` by a quiet HTTP server for the duration of the check; a URL target is loaded as-is. An HTTP status of 400 or above fails the check immediately.
 - Headless Chromium loads the page with uncaught page errors and console errors collected from the first byte.
+- Chromium writes a console error for every resource it could not load, so those are told apart from the app's own errors before the verdict is decided: the browser's carry no console arguments and are located at the URL that failed, where a real `console.error` carries its arguments and is located in the page's own script. Not a text match, so an app cannot silence itself by printing the browser's wording.
 - Every frame is scanned, not just the main one, because Shinylive apps often run inside an iframe; a selector evaluated only on the top document would silently match nothing.
 - A Shiny output counts as rendered when it has non-empty content and is not in an error state; outputs carrying `shiny-output-error` fail the check with the error text.
 - The page is polled twice a second until the verdict is clear one way or the other, or the timeout passes.

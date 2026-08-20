@@ -25,6 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `shiny_detected` in the JSON verdict: whether the Shiny runtime was observed on
   the page. A timeout that did not see it says so in the text form, so a check
   whose selectors all matched does not read as a bug in the tool.
+- `--fail-on-resource-error`, with `resource_errors` and `resource_errors_total`
+  in the verdict and a `resource-error` failure kind. Resources the browser could
+  not load are reported on a pass as well as a failure, so ignoring one does not
+  mean hiding it.
 
 ### Fixed
 
@@ -44,6 +48,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--expect "#loading" --expect "#chart"` passed on a page that showed a spinner
   and then failed. They must now be visible at the same moment, and the verdict
   reports the state at the end of the check rather than a high-water mark.
+- A resource the browser could not load failed the check. Chromium writes a
+  console error for every failed load, and every console error of that type was
+  treated as the app being broken, so one missing sourcemap, webfont or image
+  reddened CI for an app that boots perfectly. Failed loads are now told apart
+  from the app's own errors by origin rather than by message text (the browser's
+  carry no console arguments and are located at the URL that failed), reported as
+  `resource_errors`, and left out of the verdict unless
+  `--fail-on-resource-error` is given.
 - `--timeout` did not govern loading the page. Navigation had its own hardcoded
   30 second limit, so a check pointed at a host that accepts the connection and
   then never answers took 30.7 s to give up on a `--timeout 3`, and no value

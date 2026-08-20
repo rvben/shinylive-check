@@ -6,7 +6,14 @@ scores the built CLI against it with ``clispec score``.
 
 from importlib.metadata import version
 
-FAILURE_KINDS = ["error", "output-error", "timeout", "navigation", "http-status"]
+FAILURE_KINDS = [
+    "error",
+    "output-error",
+    "resource-error",
+    "timeout",
+    "navigation",
+    "http-status",
+]
 
 _VERDICT_FIELDS = [
     {"name": "target", "type": "string", "description": "The directory or URL as given"},
@@ -55,6 +62,21 @@ _VERDICT_FIELDS = [
         "name": "output_errors_total",
         "type": "integer",
         "description": "Shiny outputs in an error state, which may exceed len(output_errors)",
+    },
+    {
+        "name": "resource_errors",
+        "type": "array",
+        "items": {"type": "string"},
+        "description": (
+            "Messages for resources the browser could not load, truncated and "
+            "clipped like errors. Reported but not a failure unless "
+            "--fail-on-resource-error is given"
+        ),
+    },
+    {
+        "name": "resource_errors_total",
+        "type": "integer",
+        "description": "Failed resource loads, which may exceed len(resource_errors)",
     },
     {
         "name": "expects",
@@ -144,6 +166,16 @@ SCHEMA = {
                     "name": "--screenshot",
                     "type": "path",
                     "description": "Write a full-page screenshot to this path on failure",
+                },
+                {
+                    "name": "--fail-on-resource-error",
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Fail the check when the browser could not load a resource. "
+                        "Failed loads are reported either way; by default they do not "
+                        "decide the verdict, since a missing asset is not a broken app"
+                    ),
                 },
                 {
                     "name": "--port",

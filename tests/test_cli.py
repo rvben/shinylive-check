@@ -1,11 +1,13 @@
 """CLI contract without a browser: usage errors, --version, the schema command."""
 
+import argparse
 import json
 from dataclasses import fields
 
 from conftest import run_cli
 
 from shinylive_check.check import CheckResult
+from shinylive_check.cli import build_parser
 from shinylive_check.schema import SCHEMA
 
 
@@ -99,6 +101,33 @@ def test_every_verdict_field_is_declared_in_the_schema_and_no_others():
     }
     emitted = {field.name for field in fields(CheckResult)} | {"target"}
     assert declared == emitted
+
+
+def test_every_argument_the_parser_accepts_is_declared_in_the_schema_and_no_others():
+    """The same equality the verdict gets, for the other half of the contract.
+
+    An argument added to the parser and forgotten in the schema is a flag an agent
+    reading the contract cannot discover, and a schema entry for an argument the
+    parser rejects is worse, because it reads as a promise. `--help` and
+    `--version` are argparse's own and are not part of the declared surface.
+    """
+    declared = {arg["name"] for arg in SCHEMA["global_args"]}
+    declared |= {
+        arg["name"]
+        for command in SCHEMA["commands"]
+        if command["name"] == "check"
+        for arg in command["args"]
+    }
+    # _actions is the only way argparse exposes what it accepts.
+    accepted = set()
+    for action in build_parser()._actions:
+        if isinstance(action, argparse._HelpAction | argparse._VersionAction):
+            continue
+        long_form = next((s for s in action.option_strings if s.startswith("--")), None)
+        accepted.add(
+            long_form or (action.option_strings[0] if action.option_strings else action.dest)
+        )
+    assert declared == accepted
 
 
 def test_the_readme_sample_verdict_shows_every_field(readme):

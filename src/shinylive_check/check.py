@@ -14,8 +14,8 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from playwright.sync_api import ConsoleMessage, Page, Response, sync_playwright
 from playwright.sync_api import Error as PlaywrightError
-from playwright.sync_api import Page, sync_playwright
 
 
 class BrowserMissingError(RuntimeError):
@@ -150,6 +150,24 @@ class ExpectResult:
 
 
 @dataclass
+class _Said:
+    """One message the page produced, with where the browser located it.
+
+    ``origin`` is the URL a console error was located at, and is set only when the
+    error carried no console arguments. That pair is the shape Chromium
+    synthesises for a load it could not complete: no arguments, located at the
+    resource rather than in the page's own script. Anything the app printed itself
+    carries what console.error was called with, so the two never collide.
+
+    Deliberately not a text match. Chromium's wording for a failed load is fixed,
+    so a page that printed that sentence could otherwise silence its own errors.
+    """
+
+    text: str
+    origin: str | None = None
+
+
+@dataclass
 class _Scan:
     """What one sweep of every frame saw."""
 
@@ -172,6 +190,8 @@ class CheckResult:
     errors_total: int
     output_errors: list[str]
     output_errors_total: int
+    resource_errors: list[str]
+    resource_errors_total: int
     expects: list[ExpectResult]
     failure: str | None
     screenshot: str | None
@@ -183,6 +203,7 @@ def run_check(
     timeout: float = 180.0,
     expects: tuple[str, ...] = (),
     screenshot: str | None = None,
+    fail_on_resource_error: bool = False,
     progress: Callable[[float], None] | None = None,
 ) -> CheckResult:
     """Load ``url``, wait for the app to render, and return the verdict.
@@ -190,12 +211,18 @@ def run_check(
     Passing means: the page loaded, no console or page error occurred, no Shiny
     output is in an error state, the Shiny runtime was detected on the page, and
     either every ``expects`` selector was visible (when given) or at least one
-    Shiny output rendered non-empty content (the default). ``screenshot`` is
-    captured only on failure. ``progress`` is called with the elapsed seconds on
-    every poll, for callers reporting a wait.
+    Shiny output rendered non-empty content (the default). A resource the browser
+    could not load is reported but does not fail the check unless
+    ``fail_on_resource_error`` is set. ``screenshot`` is captured only on failure.
+    ``progress`` is called with the elapsed seconds on every poll, for callers
+    reporting a wait.
     """
     start = time.monotonic()
-    errors: list[str] = []
+    said: list[_Said] = []
+    # Every request that actually failed, by URL: a load with no response at all
+    # (a refused connection, a dead host) and a response that carried an error
+    # status are both failed loads, and only one of them produces a response.
+    failed_loads: set[str] = set()
 
     def result(
         *,
@@ -209,16 +236,19 @@ def run_check(
     ) -> CheckResult:
         state = expect_state or dict.fromkeys(expects, False)
         page_errors = output_errors or []
+        app_errors, resource_errors = _partition(said, failed_loads)
         return CheckResult(
             ok=ok,
             url=url,
             seconds=round(time.monotonic() - start, 1),
             outputs=outputs,
             shiny_detected=shiny_detected,
-            errors=_bounded(errors),
-            errors_total=len(errors),
+            errors=_bounded(app_errors),
+            errors_total=len(app_errors),
             output_errors=_bounded(page_errors),
             output_errors_total=len(page_errors),
+            resource_errors=_bounded(resource_errors),
+            resource_errors_total=len(resource_errors),
             expects=[ExpectResult(sel, done) for sel, done in state.items()],
             failure=failure,
             screenshot=shot,
@@ -234,11 +264,20 @@ def run_check(
 
         try:
             page = browser.new_page()
-            page.on("pageerror", lambda err: errors.append(f"pageerror: {err}"))
-            page.on(
-                "console",
-                lambda msg: errors.append(msg.text) if msg.type == "error" else None,
-            )
+
+            def on_console(msg: ConsoleMessage) -> None:
+                if msg.type != "error":
+                    return
+                said.append(_Said(msg.text, None if msg.args else msg.location.get("url")))
+
+            def on_response(response: Response) -> None:
+                if response.status >= 400:
+                    failed_loads.add(response.url)
+
+            page.on("pageerror", lambda err: said.append(_Said(f"pageerror: {err}")))
+            page.on("console", on_console)
+            page.on("requestfailed", lambda request: failed_loads.add(request.url))
+            page.on("response", on_response)
 
             deadline = start + timeout
             try:
@@ -246,10 +285,10 @@ def run_check(
                     url, wait_until="domcontentloaded", timeout=_remaining_millis(deadline)
                 )
             except PlaywrightError as err:
-                errors.append(str(err))
+                said.append(_Said(str(err)))
                 return result(ok=False, failure="navigation", shot=_shoot(page, screenshot))
             if response is not None and response.status >= 400:
-                errors.append(f"HTTP {response.status} for {url}")
+                said.append(_Said(f"HTTP {response.status} for {url}"))
                 return result(ok=False, failure="http-status", shot=_shoot(page, screenshot))
 
             expect_state = dict.fromkeys(expects, False)
@@ -258,12 +297,9 @@ def run_check(
             while True:
                 scan = _scan_frames(page)
                 _scan_expects(page, expect_state)
+                failure = _fault(said, failed_loads, scan, strict=fail_on_resource_error)
 
-                if errors:
-                    failure = "error"
-                elif scan.output_errors:
-                    failure = "output-error"
-                elif _satisfied(scan, expect_state, expects):
+                if failure is None and _satisfied(scan, expect_state, expects):
                     # Let the page settle briefly: a failure right after the first
                     # render still fails the check instead of racing it. Console
                     # errors arrive as events, but an output that fails inside the
@@ -272,24 +308,20 @@ def run_check(
                     page.wait_for_timeout(_SETTLE_MILLIS)
                     scan = _scan_frames(page)
                     _scan_expects(page, expect_state)
-                    if errors:
-                        failure = "error"
-                    elif scan.output_errors:
-                        failure = "output-error"
-                    elif not _satisfied(scan, expect_state, expects):
+                    failure = _fault(said, failed_loads, scan, strict=fail_on_resource_error)
+                    if failure is None and not _satisfied(scan, expect_state, expects):
                         # It held, then stopped holding. That is not a pass, and it
                         # is not yet a failure either: the app may simply be
                         # mid-rerender, so the condition has to be met again.
                         continue
+                elif failure is None:
+                    if time.monotonic() > deadline:
+                        failure = "timeout"
                     else:
-                        failure = None
-                elif time.monotonic() > deadline:
-                    failure = "timeout"
-                else:
-                    if progress is not None:
-                        progress(time.monotonic() - start)
-                    page.wait_for_timeout(_POLL_MILLIS)
-                    continue
+                        if progress is not None:
+                            progress(time.monotonic() - start)
+                        page.wait_for_timeout(_POLL_MILLIS)
+                        continue
 
                 ok = failure is None
                 return result(
@@ -314,6 +346,41 @@ def _remaining_millis(deadline: float) -> int:
     this keeps the same promise for anyone calling ``run_check`` directly.
     """
     return max(1, int((deadline - time.monotonic()) * 1000))
+
+
+def _partition(said: list[_Said], failed_loads: set[str]) -> tuple[list[str], list[str]]:
+    """Split what the page said into the app's own errors and its failed loads.
+
+    Done here rather than as each message arrives because the two events are not
+    ordered: the console error for a 404 can be delivered before or after the
+    response that proves the load failed. Deciding at the end is deciding on all
+    the evidence.
+    """
+    app: list[str] = []
+    resource: list[str] = []
+    for item in said:
+        target = resource if item.origin is not None and item.origin in failed_loads else app
+        target.append(item.text)
+    return app, resource
+
+
+def _fault(said: list[_Said], failed_loads: set[str], scan: _Scan, *, strict: bool) -> str | None:
+    """The failure the page is already showing, if any, in order of directness.
+
+    An error the app raised says more about what is wrong than an output in an
+    error state, which says more than a resource that would not load. A failed
+    load only decides the verdict under ``strict``: a missing sourcemap, webfont
+    or image is not the app being broken, and failing on one teaches a team to
+    ignore the check.
+    """
+    app_errors, resource_errors = _partition(said, failed_loads)
+    if app_errors:
+        return "error"
+    if scan.output_errors:
+        return "output-error"
+    if strict and resource_errors:
+        return "resource-error"
+    return None
 
 
 def _satisfied(scan: _Scan, expect_state: dict[str, bool], expects: tuple[str, ...]) -> bool:

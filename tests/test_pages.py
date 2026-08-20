@@ -202,6 +202,104 @@ def test_an_error_thrown_during_the_settle_window_still_fails(tmp_path):
     assert "late boom" in " ".join(verdict["errors"])
 
 
+def test_a_missing_sub_resource_does_not_fail_a_healthy_app(tmp_path):
+    """A 404 on an asset is not the app being broken.
+
+    Chromium writes a console error of type `error` for every resource it could
+    not load, and every one of those failed the check. A missing sourcemap, a
+    stale cache-busted webfont or an image nobody deployed then reddened CI for an
+    app that boots perfectly, which is the failure mode that teaches a team to
+    ignore the check. They are reported, and they do not decide the verdict.
+    """
+    site = page(tmp_path, f'{RENDERED}\n<img src="missing.png" alt="">', name="missing-asset")
+    proc = run_cli(str(site), "--timeout", "20", "-o", "json")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    verdict = json.loads(proc.stdout)
+    assert verdict["errors"] == []
+    assert verdict["resource_errors_total"] == 1
+    assert "404" in " ".join(verdict["resource_errors"])
+
+
+def test_a_sub_resource_that_never_answers_is_a_resource_error_too(tmp_path):
+    """The other half of a failed load: no HTTP status at all, just a dead host.
+
+    A refused connection never produces a response, so it is only visible as a
+    failed request. Classifying on the response alone would leave this one looking
+    like an error the app itself raised.
+    """
+    site = page(
+        tmp_path,
+        f'{RENDERED}\n<img src="http://127.0.0.1:1/nope.png" alt="">',
+        name="refused-asset",
+    )
+    proc = run_cli(str(site), "--timeout", "20", "-o", "json")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    verdict = json.loads(proc.stdout)
+    assert verdict["errors"] == []
+    assert verdict["resource_errors_total"] == 1
+
+
+def test_an_app_console_error_is_not_a_resource_error(tmp_path):
+    """The control: the app's own console.error still fails the check.
+
+    This is the boundary the split has to get right. A resource error is
+    synthesised by the browser, carries no console arguments and is located at the
+    URL that failed; a real console.error carries its arguments and is located in
+    the page's own script.
+    """
+    site = page(
+        tmp_path,
+        f'{RENDERED}\n<script>console.error("something broke");</script>',
+        name="app-console-error",
+    )
+    proc = run_cli(str(site), "--timeout", "20", "-o", "json")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    verdict = json.loads(proc.stdout)
+    assert verdict["failure"] == "error"
+    assert "something broke" in " ".join(verdict["errors"])
+    assert verdict["resource_errors"] == []
+
+
+def test_an_app_error_that_impersonates_a_resource_error_still_fails(tmp_path):
+    """The page does not get to talk its way out of failing the check.
+
+    Chromium's message for a failed load is fixed text, so classifying on the text
+    would let any app silence its own errors by printing that sentence. The origin
+    is what decides, and an app cannot forge it.
+    """
+    impersonation = "Failed to load resource: the server responded with a status of 404 (Not Found)"
+    site = page(
+        tmp_path,
+        f"{RENDERED}\n<script>console.error({json.dumps(impersonation)});</script>",
+        name="impersonation",
+    )
+    proc = run_cli(str(site), "--timeout", "20", "-o", "json")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    verdict = json.loads(proc.stdout)
+    assert verdict["failure"] == "error"
+    assert verdict["resource_errors"] == []
+
+
+def test_fail_on_resource_error_makes_a_missing_asset_fail(tmp_path):
+    """The opt-in for a project where every asset is meant to be there."""
+    site = page(tmp_path, f'{RENDERED}\n<img src="missing.png" alt="">', name="strict-asset")
+    proc = run_cli(str(site), "--fail-on-resource-error", "--timeout", "20", "-o", "json")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    verdict = json.loads(proc.stdout)
+    assert verdict["failure"] == "resource-error"
+    assert "404" in " ".join(verdict["resource_errors"])
+
+
+def test_an_ignored_resource_error_is_still_visible_on_a_pass(tmp_path):
+    """Ignored must not mean hidden: a 404 nobody can see is one nobody fixes."""
+    site = page(tmp_path, f'{RENDERED}\n<img src="missing.png" alt="">', name="visible-asset")
+    proc = run_cli(str(site), "--timeout", "20", "-o", "text")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert proc.stdout.startswith("OK:")
+    assert "resource error" in proc.stdout
+    assert "--fail-on-resource-error" in proc.stdout
+
+
 def test_an_unhandled_promise_rejection_fails_the_check(tmp_path):
     """The shape a pyodide boot failure actually takes.
 

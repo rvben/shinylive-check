@@ -111,6 +111,12 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="write a full-page screenshot to this path on failure",
     )
+    parser.add_argument(
+        "--fail-on-resource-error",
+        action="store_true",
+        help="fail the check when the browser could not load a resource (a 404 asset, "
+        "a missing sourcemap); reported but ignored by default",
+    )
     _add_output_flag(parser, "verdict")
     parser.add_argument(
         "--port",
@@ -283,6 +289,7 @@ def _dispatch(args_list: list[str]) -> int:
             timeout=args.timeout,
             expects=tuple(args.expect),
             screenshot=args.screenshot,
+            fail_on_resource_error=args.fail_on_resource_error,
             progress=_heartbeat(_HEARTBEAT_SECONDS, sys.stderr.write),
         )
     except (UsageError, SelectorError) as err:
@@ -319,6 +326,25 @@ def _detail(text: str, label: str = "") -> list[str]:
     return [f"  {line}" for line in f"{label}{text}".splitlines() or [""]]
 
 
+def _resource_lines(result: CheckResult) -> list[str]:
+    """Failed loads, always shown, labelled by whether they decided the verdict.
+
+    Ignored must not mean hidden: a 404 nobody can see is a 404 nobody fixes, and
+    the flag that would have failed on it is named here rather than in the manual.
+    """
+    if not result.resource_errors_total:
+        return []
+    plural = "" if result.resource_errors_total == 1 else "s"
+    count = f"{result.resource_errors_total} resource error{plural}"
+    if result.failure == "resource-error":
+        lines = [f"  {count}:"]
+    else:
+        lines = [f"  {count} ignored (--fail-on-resource-error to fail on these):"]
+    for text in result.resource_errors:
+        lines += _detail(text, "resource: ")
+    return lines
+
+
 def render_text(result: CheckResult) -> str:
     """The one-glance verdict: a headline, then every reason it failed."""
     if result.ok:
@@ -328,7 +354,7 @@ def render_text(result: CheckResult) -> str:
         )
         if result.expects:
             line += f" ({len(result.expects)} expect selector(s) satisfied)"
-        return line
+        return "\n".join([line, *_resource_lines(result)])
 
     headlines = {
         # The counts are what OCCURRED, not what is listed below: the lists are
@@ -341,6 +367,7 @@ def render_text(result: CheckResult) -> str:
         "timeout": f"app did not render (waited {result.seconds:.1f}s)",
         "navigation": "could not load the page",
         "http-status": "the page answered an HTTP error",
+        "resource-error": f"{result.resource_errors_total} resource(s) failed to load",
     }
     headline = headlines.get(result.failure or "", "check failed")
     lines = [f"FAIL ({result.failure}): {headline} at {result.url}"]
@@ -352,6 +379,7 @@ def render_text(result: CheckResult) -> str:
         lines += _detail(error)
     for text in result.output_errors:
         lines += _detail(text, "output error: ")
+    lines += _resource_lines(result)
     lines += [
         f"  expect not satisfied: {expect.selector}"
         for expect in result.expects

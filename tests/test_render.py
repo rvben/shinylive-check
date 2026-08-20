@@ -19,6 +19,7 @@ from shinylive_check.check import (
     _printable,
 )
 from shinylive_check.cli import _heartbeat, _requested_format, render_text
+from shinylive_check.schema import FAILURE_KINDS
 
 
 def verdict(**overrides: Any) -> CheckResult:
@@ -29,6 +30,7 @@ def verdict(**overrides: Any) -> CheckResult:
         "outputs": 0,
         "errors": [],
         "output_errors": [],
+        "resource_errors": [],
         "expects": [],
         "failure": None,
         "screenshot": None,
@@ -38,6 +40,7 @@ def verdict(**overrides: Any) -> CheckResult:
     # unclipped one unless a test says otherwise.
     fields.setdefault("errors_total", len(fields["errors"]))
     fields.setdefault("output_errors_total", len(fields["output_errors"]))
+    fields.setdefault("resource_errors_total", len(fields["resource_errors"]))
     # A rendered output is itself proof the runtime ran, so the default is derived
     # rather than fixed: a verdict built here is never internally contradictory.
     fields.setdefault("shiny_detected", fields["outputs"] > 0)
@@ -112,6 +115,20 @@ def test_a_navigation_failure_says_the_page_would_not_load():
 
 def test_an_http_failure_says_the_page_answered_an_error():
     assert "answered an HTTP error" in render_text(verdict(failure="http-status"))
+
+
+def test_every_declared_failure_kind_has_its_own_headline():
+    """A kind the renderer does not know falls back to a headline saying nothing.
+
+    The fallback exists so an unknown kind still renders, which means a kind added
+    to the contract and forgotten here degrades silently into "check failed" for
+    the one reader who needed to know why. Distinctness is the second half: two
+    kinds sharing a headline is the same loss.
+    """
+    headlines = {kind: render_text(verdict(failure=kind)).splitlines()[0] for kind in FAILURE_KINDS}
+    for kind, headline in headlines.items():
+        assert "check failed" not in headline, kind
+    assert len(set(headlines.values())) == len(FAILURE_KINDS)
 
 
 def test_an_unknown_failure_kind_still_renders_a_headline():
