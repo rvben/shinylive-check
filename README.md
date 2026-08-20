@@ -131,6 +131,7 @@ $ shinylive-check site | jq .
   "url": "http://127.0.0.1:54535/",
   "seconds": 4.7,
   "outputs": 1,
+  "shiny_detected": true,
   "errors": [],
   "errors_total": 0,
   "output_errors": [],

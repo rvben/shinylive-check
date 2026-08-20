@@ -29,6 +29,12 @@ def export_app(name: str, tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 
 @pytest.fixture(scope="session")
+def readme() -> str:
+    """The README as text, for the tests that hold the docs to the contract."""
+    return (Path(__file__).parent.parent / "README.md").read_text(encoding="utf-8")
+
+
+@pytest.fixture(scope="session")
 def ok_site(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return export_app("ok", tmp_path_factory)
 

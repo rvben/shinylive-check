@@ -101,6 +101,22 @@ def test_every_verdict_field_is_declared_in_the_schema_and_no_others():
     assert declared == emitted
 
 
+def test_the_readme_sample_verdict_shows_every_field(readme):
+    """The README's JSON sample is a promise about what a script will receive.
+
+    A field added to the verdict and forgotten here leaves the sample quietly
+    wrong, and the sample is where someone writing a script looks first. Equality
+    for the same reason the schema test uses it: a stale key reads as a field that
+    still exists.
+    """
+    _, _, after = readme.partition("$ shinylive-check site | jq .\n")
+    sample, fence, _ = after.partition("\n```")
+    assert fence, "the README no longer contains the piped-verdict sample"
+    documented = set(json.loads(sample))
+    emitted = {field.name for field in fields(CheckResult)} | {"target"}
+    assert documented == emitted
+
+
 def test_check_subcommand_is_an_alias_for_the_bare_target(tmp_path):
     # `shinylive-check check <target>` and `shinylive-check <target>` are the same
     # command; both reject a directory that is not an export, identically.
