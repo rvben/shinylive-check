@@ -16,8 +16,10 @@ jobs:
   checks:
     name: Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
-    # Generous: `playwright install --with-deps` fetches fonts from the Ubuntu mirror,
-    # which has taken over ten minutes on a slow day.
+    # Generous against the apt half of `playwright install --with-deps`, which is
+    # the part that varies: measured across every run so far it is 20-29s, once
+    # 262s. The download half is not worth caching - the browser is around 550 MB,
+    # so restoring it from the Actions cache costs about what fetching it costs.
     timeout-minutes: 30
     strategy:
       fail-fast: false
