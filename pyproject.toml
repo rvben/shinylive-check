@@ -1,0 +1,86 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "shinylive-check"
+version = "0.1.0"
+description = "Smoke-check an exported Shinylive site in headless Chromium: fail CI on boot failures, console errors and unrendered outputs."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+  { name = "Ruben J. Jongejan", email = "ruben.jongejan@gmail.com" },
+]
+keywords = ["shiny", "shinylive", "pyodide", "playwright", "ci", "smoke-test", "wasm"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Software Development :: Testing",
+  "Typing :: Typed",
+]
+# The floor is what `make check-floor` installs and tests.
+dependencies = [
+  "playwright>=1.48",
+]
+
+[project.scripts]
+shinylive-check = "shinylive_check.cli:main"
+
+[project.urls]
+Homepage   = "https://github.com/rvben/shinylive-check"
+Repository = "https://github.com/rvben/shinylive-check"
+Changelog  = "https://github.com/rvben/shinylive-check/blob/main/CHANGELOG.md"
+Issues     = "https://github.com/rvben/shinylive-check/issues"
+
+[dependency-groups]
+dev = [
+  "pytest>=8",
+  "ruff>=0.6",
+  "pyright>=1.1.380",
+]
+
+# uv's default cache keys for a local build are the metadata files only, so a source-only
+# change would keep serving the previously built wheel to `uv pip install .`. Key the
+# cache on the shipped source too.
+[tool.uv]
+cache-keys = [{ file = "pyproject.toml" }, { file = "src/**/*" }]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/shinylive_check"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/shinylive_check", "tests", "README.md", "CHANGELOG.md", "LICENSE"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["error"]
+markers = ["browser: exports fixture apps and drives the CLI against them in a real Chromium"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+# The boot_error fixture imports shiny purely so the export bundles its wheels,
+# then raises before using it.
+"tests/fixtures/**" = ["F401"]
+
+[tool.pyright]
+include = ["src", "tests"]
+# The fixture apps import shiny, which is not (and must not be) a dependency of
+# this package; they run only inside pyodide after a shinylive export.
+exclude = ["tests/fixtures"]
+pythonVersion = "3.10"
+typeCheckingMode = "standard"

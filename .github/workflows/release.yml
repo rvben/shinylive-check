@@ -1,0 +1,119 @@
+name: Release
+
+# Triggered by a version tag (`vership bump patch` pushes one). Re-runs the CI
+# targets on the tagged commit, builds the distribution once, publishes it to
+# PyPI through trusted publishing (no token: the repository must be registered
+# as a trusted publisher for the `shinylive-check` project on PyPI, environment
+# `pypi`), and creates the GitHub release with the CHANGELOG.md section as body.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify the tagged commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: "0.12.5"
+          python-version: "3.13"
+          enable-cache: true
+
+      - name: Tag matches pyproject.toml
+        run: make check-version VERSION="${GITHUB_REF_NAME#v}"
+
+      - name: CHANGELOG.md has a section for this version
+        run: make release-notes VERSION="${GITHUB_REF_NAME#v}"
+
+      - run: make lock-check
+      - run: make sync
+      - run: make lint
+      - run: make typecheck
+      - run: make test
+      - run: make browsers PLAYWRIGHT_ARGS=--with-deps
+      - run: make test-browser
+      - run: make check-floor PLAYWRIGHT_ARGS=--with-deps
+
+  build:
+    name: Build
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: "0.12.5"
+          python-version: "3.13"
+          enable-cache: true
+
+      # check-wheel builds dist/ and runs the suite against the installed wheel,
+      # so what is uploaded below is what was tested.
+      - run: make check-wheel
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/project/shinylive-check/
+    permissions:
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: "0.12.5"
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+
+      - run: make publish
+
+  github-release:
+    name: GitHub release
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+
+      - name: Extract release notes from CHANGELOG.md
+        run: make release-notes VERSION="${GITHUB_REF_NAME#v}"
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          body_path: tmp/release-notes.md
+          files: dist/*
+          fail_on_unmatched_files: true

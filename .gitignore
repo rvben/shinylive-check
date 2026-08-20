@@ -1,0 +1,9 @@
+.venv/
+.wheel-venv/
+.floor-venv/
+dist/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+tmp/
