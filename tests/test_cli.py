@@ -7,6 +7,7 @@ import re
 import subprocess
 import sys
 from dataclasses import fields
+from pathlib import Path
 
 from conftest import run_cli
 
@@ -57,6 +58,23 @@ def test_version_prints_a_version():
     proc = run_cli("--version")
     assert proc.returncode == 0
     assert proc.stdout.strip().count(".") == 2
+
+
+def test_the_installed_console_script_runs():
+    """`shinylive-check` is the name people type; the suite runs the module.
+
+    `python -m shinylive_check` works from a checkout with nothing installed, so
+    an entry point that was never written, or that points at a function which has
+    since moved, is invisible to every other test here and immediately visible to
+    anyone who installed the package. Under `make check-wheel` this runs against
+    the built wheel, which is where that promise is actually kept.
+    """
+    script = Path(sys.executable).parent / "shinylive-check"
+    assert script.exists(), f"no console script next to the interpreter at {script}"
+    proc = subprocess.run([str(script), "--version"], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    # Byte for byte what the module form says, so the two ways in cannot drift.
+    assert proc.stdout == run_cli("--version").stdout
 
 
 def _run_unread(*args: str) -> tuple[int, str]:

@@ -64,6 +64,47 @@ def test_a_page_that_renders_an_output_passes(tmp_path):
     assert json.loads(proc.stdout)["outputs"] == 1
 
 
+def test_a_pass_writes_no_screenshot(tmp_path):
+    """`--screenshot` is documented as the picture of what the visitor would have
+    seen, taken only when the check fails.
+
+    A run that shoots every time is still green, and the file it leaves is the
+    one a CI job uploads and a person reads as evidence of a failure.
+    """
+    shot = tmp_path / "shot.png"
+    proc = run_cli(
+        str(page(tmp_path, RENDERED)), "--screenshot", str(shot), "--timeout", "20", "-o", "json"
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert not shot.exists(), "a passing check left a failure screenshot behind"
+    assert json.loads(proc.stdout)["screenshot"] is None
+
+
+def test_the_verdict_echoes_the_target_and_times_the_run(tmp_path):
+    """Two fields nothing else asserts against a real run.
+
+    `target` is the directory as the user gave it, which is what a script keys a
+    report by, and `seconds` is how long the check took. Both are the kind of
+    field that can quietly become a resolved path or a zero without any other
+    test noticing, since every other assertion is about the verdict.
+
+    The target is given relative, from the directory beside it: an absolute path
+    is already its own resolved form, so echoing it back proves nothing about
+    which of the two the verdict carries.
+    """
+    page(tmp_path, RENDERED)
+    started = time.monotonic()
+    proc = run_cli("site", "--timeout", "20", "-o", "json", cwd=tmp_path)
+    elapsed = time.monotonic() - started
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    verdict = json.loads(proc.stdout)
+    assert verdict["target"] == "site"
+    assert verdict["url"].startswith("http://127.0.0.1:")
+    # Bounded on both sides: above zero, since a missing duration is not a fast
+    # check, and no larger than the wall time of the process that measured it.
+    assert 0 < verdict["seconds"] <= elapsed
+
+
 def test_an_http_error_status_fails_as_http_status(tmp_path):
     server = _JoiningServer(("127.0.0.1", 0), _NotFound)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
