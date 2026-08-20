@@ -32,6 +32,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A page whose main thread stopped answering was never judged at all. Reading the
+  page is the one thing the check cannot do on its own clock: `evaluate` is the
+  only playwright call that takes no timeout, so an app running an infinite loop,
+  a long synchronous WASM step or a pathological layout blocked the scan inside
+  the browser, where the poll loop's deadline could not reach it. A `--timeout 5`
+  check against such a page was measured still running at 45 seconds, with no
+  verdict and not even the progress line, since the loop that prints it was never
+  re-entered. Naming an `--expect` selector cost the same way for a different
+  reason: `is_visible` documents its own timeout argument as ignored and waits
+  playwright's 30 second default instead, once per selector per frame per poll,
+  which turned an 8 second budget into 65 seconds. Frames are now asked whether
+  they are still answering through a call playwright bounds in the driver rather
+  than in the page, and one that is not answering is reported as the timeout it
+  is. That question is asked once for a whole sweep, and the sweep is bounded by
+  what is left of the budget, so neither many frames nor many selectors can buy a
+  page more time than the check was given.
 - An app whose output kept appearing and disappearing ran forever, ignoring
   `--timeout` entirely. The check consulted its deadline only while waiting for a
   first render; the other way back to waiting, a settle window withdrawing a pass

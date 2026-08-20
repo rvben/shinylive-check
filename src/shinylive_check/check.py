@@ -15,7 +15,7 @@ import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from playwright.sync_api import ConsoleMessage, Page, Response, sync_playwright
+from playwright.sync_api import ConsoleMessage, Frame, Page, Response, sync_playwright
 from playwright.sync_api import Error as PlaywrightError
 
 
@@ -60,6 +60,17 @@ _FRAME_SCAN = """
 
 _POLL_MILLIS = 500
 _SETTLE_MILLIS = 500
+
+# How long one sweep may spend proving the page is still answering before it is
+# treated as wedged. A frame that is alive answers in single-digit milliseconds,
+# so this is three orders of magnitude more room than the question needs.
+_RESPONSIVE_MILLIS = 2000
+
+# The least a sweep is ever given, however little of the budget is left. The last
+# sweep of a check runs at or past its own deadline, and asking a live page to
+# answer within the zero milliseconds remaining would report an app that had
+# rendered as one that never did.
+_RESPONSIVE_FLOOR_MILLIS = 250
 
 # Newlines and tabs survive because tracebacks need them, and because a line
 # break is the one piece of formatting the page is allowed to ask for: `_detail`
@@ -309,8 +320,9 @@ def run_check(
             scan = _Scan(outputs=0, output_errors=[], shiny_detected=False)
 
             while True:
-                scan = _scan_frames(page)
-                _scan_expects(page, expect_state)
+                answering = _answering(page, deadline)
+                scan = _scan_frames(answering)
+                _scan_expects(answering, expect_state)
                 failure = _fault(said, failed_loads, scan, strict=fail_on_resource_error)
 
                 if failure is None and _satisfied(scan, expect_state, expects):
@@ -320,8 +332,9 @@ def run_check(
                     # window is only visible to another scan, so the page is
                     # re-scanned rather than just re-read.
                     page.wait_for_timeout(_SETTLE_MILLIS)
-                    scan = _scan_frames(page)
-                    _scan_expects(page, expect_state)
+                    answering = _answering(page, deadline)
+                    scan = _scan_frames(answering)
+                    _scan_expects(answering, expect_state)
                     failure = _fault(said, failed_loads, scan, strict=fail_on_resource_error)
                     if failure is None and not _satisfied(scan, expect_state, expects):
                         # It held, then stopped holding. That is not a pass, and it
@@ -450,12 +463,65 @@ def _satisfied(scan: _Scan, expect_state: dict[str, bool], expects: tuple[str, .
     return scan.outputs >= 1
 
 
-def _scan_frames(page: Page) -> _Scan:
-    """One sweep of every frame, summed."""
+def _answering(page: Page, deadline: float) -> list[Frame]:
+    """The frames still answering, asked once for the whole sweep.
+
+    ``evaluate`` is the one playwright call that takes no timeout, so a page
+    running an infinite loop - or any long synchronous main-thread work, a heavy
+    WASM step or a pathological layout - blocked the scan inside the browser,
+    where the poll loop's deadline could not reach it. A ``--timeout 5`` check
+    against such a page was measured still running at 45 seconds, with no verdict
+    and not even the progress line, because the loop that prints it was never
+    re-entered.
+
+    Playwright enforces its timeouts in the driver rather than in the page, so a
+    call that accepts one is bounded even when the page never answers. This asks
+    the cheapest question there is through such a call. The predicate is constant,
+    so a live frame resolves it on the first evaluation and is not slowed by being
+    asked.
+
+    Asked once per sweep, and not once per question the sweep goes on to ask.
+    Gating each selector lookup on its own liveness check left the cost multiplied
+    by however many selectors the caller had named: twenty of them turned an 8
+    second budget into 46 seconds, so describing the page in more detail bought a
+    weaker guarantee about how long checking that description would take.
+
+    The sweep as a whole is bounded by what is left of the budget, which is what
+    keeps a page from buying time by holding many frames rather than by wedging
+    one. Frames are asked in order until that is spent; whatever is left unasked
+    could not have been read in the time remaining anyway.
+
+    This bounds the wait, which is what the budget promises; it does not make
+    reading the page atomic. A frame that stops answering in the moment between
+    this question and the scan that follows blocks that scan, because playwright
+    offers no bounded way to read a value back. A page wedges once and stays
+    wedged, so that window costs a check nothing it can notice.
+    """
+    ends = time.monotonic() + _sweep_millis(deadline) / 1000
+    answering: list[Frame] = []
+    for frame in page.frames:
+        left = int((ends - time.monotonic()) * 1000)
+        if left <= 0:
+            break
+        try:
+            frame.wait_for_function("() => true", timeout=left)
+        except PlaywrightError:
+            continue  # wedged: nothing can be read from it, and reading is unbounded
+        answering.append(frame)
+    return answering
+
+
+def _sweep_millis(deadline: float) -> int:
+    """How long one liveness sweep may take, in the budget's terms."""
+    return max(_RESPONSIVE_FLOOR_MILLIS, min(_RESPONSIVE_MILLIS, _remaining_millis(deadline)))
+
+
+def _scan_frames(frames: list[Frame]) -> _Scan:
+    """One sweep of every frame that is answering, summed."""
     outputs = 0
     output_errors: list[str] = []
     shiny_detected = False
-    for frame in page.frames:
+    for frame in frames:
         try:
             scan = frame.evaluate(_FRAME_SCAN)
         except PlaywrightError:
@@ -466,7 +532,7 @@ def _scan_frames(page: Page) -> _Scan:
     return _Scan(outputs=outputs, output_errors=output_errors, shiny_detected=shiny_detected)
 
 
-def _scan_expects(page: Page, expect_state: dict[str, bool]) -> None:
+def _scan_expects(frames: list[Frame], expect_state: dict[str, bool]) -> None:
     """Record which selectors are visible in some frame, as of now.
 
     Deliberately not sticky. Naming several selectors is a caller describing a
@@ -478,10 +544,16 @@ def _scan_expects(page: Page, expect_state: dict[str, bool]) -> None:
 
     Every selector reaching here parses, having been checked before the page was
     loaded, so an error is a frame that went away and nothing else.
+
+    Only frames known to be answering are asked, for the same reason the scan
+    skips the rest: ``is_visible`` documents its own ``timeout`` argument as
+    ignored, so against a page whose main thread never yields it waits
+    playwright's 30 second default - per selector, per frame - which is a limit
+    the caller's budget does not govern and cannot shorten.
     """
     for selector in expect_state:
         visible = False
-        for frame in page.frames:
+        for frame in frames:
             try:
                 if frame.locator(selector).first.is_visible():
                     visible = True

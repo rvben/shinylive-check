@@ -8,14 +8,18 @@ than left to the handful of browser tests that happen to render text.
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 
 from shinylive_check.check import (
+    _RESPONSIVE_FLOOR_MILLIS,
+    _RESPONSIVE_MILLIS,
     CheckResult,
     ExpectResult,
     _bounded,
     _json_cost,
     _printable,
+    _sweep_millis,
 )
 from shinylive_check.cli import _heartbeat, _requested_format, render_text
 from shinylive_check.schema import FAILURE_KINDS
@@ -239,6 +243,25 @@ def test_no_page_can_push_a_reported_list_past_its_ceiling():
             reported = _bounded([char * length] * count)
             encoded = len(json.dumps(reported))
             assert encoded < 600_000, f"{char!r} x{count} of {length} gave {encoded} bytes"
+
+
+def test_a_liveness_sweep_is_bounded_by_the_budget_but_never_to_nothing():
+    """What one sweep may spend asking whether the page is still answering.
+
+    Bounded by what is left of the budget, so a page cannot buy time by holding
+    many frames rather than by wedging one: frames are asked in turn until the
+    sweep's share is gone.
+
+    Floored all the same, because the last sweep of a check runs at or past its
+    own deadline - the settle window alone can carry it there - and a live frame
+    asked to answer within the zero milliseconds remaining would be read as wedged,
+    reporting an app that had rendered as one that never did.
+    """
+    now = time.monotonic()
+    assert _sweep_millis(now + 60) == _RESPONSIVE_MILLIS
+    assert _sweep_millis(now - 5) == _RESPONSIVE_FLOOR_MILLIS
+    half = _sweep_millis(now + (_RESPONSIVE_MILLIS / 2) / 1000)
+    assert _RESPONSIVE_FLOOR_MILLIS < half <= _RESPONSIVE_MILLIS / 2, half
 
 
 def test_the_heartbeat_reports_no_more_often_than_its_interval():

@@ -491,6 +491,118 @@ def test_an_output_that_keeps_flickering_cannot_outlast_the_timeout(tmp_path):
     assert verdict["seconds"] < 15, verdict["seconds"]
 
 
+def test_a_page_that_wedges_its_own_main_thread_cannot_outlast_the_timeout(tmp_path):
+    """A page that stops answering must be judged, not waited on forever.
+
+    Reading the page is the one thing the check cannot do without the page's
+    cooperation: `frame.evaluate` is the single playwright call that takes no
+    timeout, so a site whose main thread never yields again blocked the scan
+    inside the browser, where the poll loop's own deadline could not reach it. A
+    `--timeout 5` check against this page was measured still running at 45
+    seconds, with no verdict and not even the 15 second progress line, because
+    the loop that prints it was never re-entered.
+
+    An infinite loop is the honest version of a broad class: any long synchronous
+    call on the main thread - a heavy WASM step, a pathological layout - stops the
+    page answering for as long as it runs. The verdict is `timeout` because that
+    is what happened. The app never rendered, and a page that cannot answer
+    cannot be distinguished from one that has nothing to say.
+    """
+    site = page(
+        tmp_path,
+        """
+<div id="one" class="shiny-bound-output"></div>
+<script>setTimeout(function () { while (true) {} }, 400);</script>""",
+        name="wedged",
+    )
+    try:
+        # Eight seconds for the same reason as the flicker case above: launching
+        # Chromium is inside the budget, and a loaded machine can spend seconds
+        # there. The wedge is armed on a timer rather than inline so the page
+        # finishes loading first, which puts the hang in the scan loop under test
+        # rather than in navigation.
+        proc = run_cli(str(site), "--timeout", "8", "-o", "json", timeout=90)
+    except subprocess.TimeoutExpired as expired:
+        raise AssertionError(
+            "the check never returned: a wedged page outlasted --timeout"
+        ) from expired
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    verdict = json.loads(proc.stdout)
+    assert verdict["failure"] == "timeout", verdict
+    assert verdict["seconds"] < 15, verdict["seconds"]
+
+
+def test_a_wedged_page_holding_a_second_frame_is_still_bounded(tmp_path):
+    """The sweep runs out of budget mid-page, and what it cannot ask it must skip.
+
+    An export puts the app in an iframe, and a same-origin iframe shares the main
+    thread with the page holding it, so a single infinite loop wedges both frames
+    at once. The first then spends the whole sweep and leaves nothing for the
+    second - and playwright reads a zero timeout as "wait forever", so handing the
+    remainder along instead of stopping restores the unbounded wait the bound
+    exists to prevent, on the very page shape a shinylive export has.
+    """
+    site = page(
+        tmp_path,
+        """
+<div id="one" class="shiny-bound-output"></div>
+<iframe src="child.html"></iframe>
+<script>setTimeout(function () { while (true) {} }, 400);</script>""",
+        name="wedged-frames",
+    )
+    (site / "child.html").write_text("<html><body><p>child</p></body></html>\n")
+    try:
+        proc = run_cli(str(site), "--timeout", "8", "-o", "json", timeout=90)
+    except subprocess.TimeoutExpired as expired:
+        raise AssertionError(
+            "the check never returned: a frame the sweep could not reach outlasted --timeout"
+        ) from expired
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    verdict = json.loads(proc.stdout)
+    assert verdict["failure"] == "timeout", verdict
+    assert verdict["seconds"] < 20, verdict["seconds"]
+
+
+def test_expect_selectors_do_not_extend_the_budget_on_a_wedged_page(tmp_path):
+    """The other way a page that stops answering costs a caller their timeout.
+
+    Looking a selector up is a second question put to the page, and
+    `is_visible` documents its own `timeout` argument as ignored: it waits
+    playwright's 30 second default instead, once per selector per frame per poll.
+    Measured against the page below on a `--timeout 8` budget, two selectors took
+    65 seconds before anything gated the lookup.
+
+    Gating each lookup on its own liveness question only made the multiplier
+    smaller. The wait per selector per frame fell from 30 seconds to 2, so the
+    same 8 second budget bought 46 seconds once twenty selectors were named, and
+    more with more. A caller who describes the page in detail must not pay for
+    describing it, so liveness is now asked once per sweep and every selector is
+    answered from that one question.
+
+    So this is not the same defect as the scan above wearing a different hat. That
+    one never returned at all; this one returns, having spent several times the
+    budget it was given, which is the failure `--timeout` exists to make
+    impossible.
+    """
+    site = page(
+        tmp_path,
+        """
+<div id="one" class="shiny-bound-output"></div>
+<script>setTimeout(function () { while (true) {} }, 400);</script>""",
+        name="wedged-expect",
+    )
+    # Enough selectors that a per-selector wait is unmistakable in the wall time,
+    # which two were not: two passed this bound while still costing 9 seconds.
+    named = [flag for i in range(20) for flag in ("--expect", f"#missing-{i}")]
+    proc = run_cli(str(site), *named, "--timeout", "8", "-o", "json", timeout=300)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    verdict = json.loads(proc.stdout)
+    assert verdict["failure"] == "timeout", verdict
+    # Comfortably between the two measurements, 46 seconds against 9, so neither a
+    # slow machine nor a fast one decides the outcome.
+    assert verdict["seconds"] < 20, verdict["seconds"]
+
+
 def test_expect_selectors_must_be_satisfied_at_the_same_moment(tmp_path):
     """Two selectors that are never visible together do not add up to a pass.
 
