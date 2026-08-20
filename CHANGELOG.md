@@ -71,7 +71,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--output json check TARGET` did not reach the `check` command, though the
   contract declares `--output` global and `check TARGET` equivalent to the bare
   form. All four flag spellings are now recognised ahead of the command keyword.
-- A directory literally named `check` was unreachable as a target.
+- A directory literally named `check` was unreachable as a target. The first fix
+  handled only the bare `shinylive-check check`; the keyword is now read as an
+  alias whenever that leaves a valid invocation, and as a target when it does
+  not, so `shinylive-check check --timeout 15` reaches the directory. With no
+  such directory it reports the missing target rather than a path nobody typed.
+  `schema` deliberately resolves the other way and always prints the contract,
+  which cannot be allowed to depend on the working directory; it now says on
+  stderr that `./schema` checks a directory of that name.
 - A timeout reported the requested timeout rather than measured wall time, so a
   run could claim it gave up in less time than it actually took.
 - A screenshot that could not be written (unwritable directory, full disk) raised

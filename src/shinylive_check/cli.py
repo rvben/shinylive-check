@@ -40,7 +40,8 @@ exit codes:
   4  environment error: Chromium is not installed for playwright
   5  internal error: shinylive-check itself failed
 
-`shinylive-check schema` prints the machine-readable contract.
+`shinylive-check schema` prints the machine-readable contract; pass ./schema to
+check a directory of that name.
 """
 
 
@@ -209,6 +210,45 @@ def _heartbeat(every: float, write: Callable[[str], object]) -> Callable[[float]
     return report
 
 
+def _parse_check(args_list: list[str], lead: int) -> argparse.Namespace:
+    """Parse the invocation, deciding whether a leading `check` is the keyword.
+
+    `check` is this command's own name and an ordinary directory name, and a
+    directory is what the command takes. The keyword reading wins whenever it
+    leaves a valid invocation, which is every normal use, so an explicit target
+    is never second-guessed. When it does not - the keyword with no target after
+    it, whatever flags follow - a directory of that name is the only reading left
+    that means anything, so it is used. With no such directory the keyword
+    reading's error stands, because a caller who typed `check --timeout 15` in an
+    empty directory needs to be told the target is missing, not that `check` is
+    not a directory.
+    """
+    stripped = args_list[:lead] + args_list[lead + 1 :]
+    try:
+        return build_parser().parse_args(stripped)
+    except UsageError:
+        if not Path(args_list[lead]).is_dir():
+            raise
+        return build_parser().parse_args(args_list)
+
+
+def _note_shadowed_schema_directory() -> None:
+    """Say so when `schema` could just as well have named a directory here.
+
+    The contract command has to mean the contract in every working directory: an
+    agent reading the interface from a project that happens to have a `schema/`
+    folder must not get a verdict about that folder instead. So the keyword wins
+    unconditionally here, unlike `check`, and the ambiguity is answered with a
+    note naming the way to reach the directory rather than with a guess. It goes
+    to stderr, so the contract on stdout stays parseable.
+    """
+    if Path("schema").is_dir():
+        print(
+            "note: printing the contract; ./schema checks the directory of that name",
+            file=sys.stderr,
+        )
+
+
 def _schema_command(args_list: list[str]) -> int:
     """Print the contract, after validating the invocation like any other command."""
     parser = _Parser(
@@ -259,13 +299,12 @@ def _dispatch(args_list: list[str]) -> int:
         lead = _leading_globals(args_list)
         keyword = args_list[lead] if lead < len(args_list) else None
         if keyword == "schema":
+            _note_shadowed_schema_directory()
             return _schema_command(args_list[:lead] + args_list[lead + 1 :])
-        # `check` is an alias for the bare form, but only when a target follows it:
-        # a directory really named `check` stays reachable.
-        if keyword == "check" and len(args_list) > lead + 1:
-            args_list = args_list[:lead] + args_list[lead + 1 :]
-
-        args = build_parser().parse_args(args_list)
+        if keyword == "check":
+            args = _parse_check(args_list, lead)
+        else:
+            args = build_parser().parse_args(args_list)
         fmt = _resolve_format(None if args.output == "auto" else args.output)
 
         if args.timeout <= 0:

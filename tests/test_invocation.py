@@ -73,6 +73,67 @@ def test_a_directory_named_check_is_still_a_target(tmp_path):
     assert "index.html" in proc.stderr
 
 
+def test_a_directory_named_check_is_still_a_target_when_flags_follow(tmp_path):
+    """`check` names a directory as readily as it names the command.
+
+    The alias may claim the token only when claiming it leaves an invocation that
+    means something. `check --timeout 15` has no target after the keyword, so the
+    directory is the only reading left; a guard asking merely whether anything
+    follows the keyword answers this one wrong.
+    """
+    (tmp_path / "check").mkdir()
+    proc = run_cli("check", "--timeout", "15", cwd=tmp_path)
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "index.html" in proc.stderr
+
+
+def test_the_check_keyword_without_a_target_says_the_target_is_missing(tmp_path):
+    """The control for the test above: no such directory, so the keyword stands.
+
+    Reading `check` as the target here would report that `check` is not a
+    directory, which describes a path the caller never typed.
+    """
+    proc = run_cli("check", "--timeout", "15", cwd=tmp_path)
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    envelope = json.loads(proc.stderr.strip().splitlines()[-1])
+    assert "target" in envelope["error"]["message"]
+    assert "not a directory" not in envelope["error"]["message"]
+
+
+def test_the_schema_keyword_wins_over_a_directory_of_the_same_name(tmp_path):
+    """The contract command means the contract in every working directory.
+
+    Deliberate, and the opposite of the rule for `check`: an agent asking for the
+    contract from a project that happens to have a `schema/` folder must not get
+    a verdict about that folder instead. The directory stays reachable by path,
+    and a note on stderr says so, where it cannot corrupt the JSON on stdout.
+    """
+    (tmp_path / "schema").mkdir()
+    proc = run_cli("schema", cwd=tmp_path)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert json.loads(proc.stdout)["name"] == "shinylive-check"
+    assert "./schema" in proc.stderr
+
+
+def test_a_directory_named_schema_is_reachable_by_path(tmp_path):
+    """The escape hatch the note points at has to actually work."""
+    (tmp_path / "schema").mkdir()
+    proc = run_cli("./schema", cwd=tmp_path)
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "index.html" in proc.stderr
+
+
+def test_the_help_names_the_escape_hatch_for_a_shadowed_directory():
+    """The `schema` keyword wins by design, so the other reading needs a signpost.
+
+    Rejecting the "make the directory win" reading is only defensible while the
+    way to reach the directory is documented where someone hits the problem.
+    """
+    proc = run_cli("--help")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "./schema" in proc.stdout
+
+
 def test_the_schema_command_rejects_an_unknown_flag():
     proc = run_cli("schema", "--this-is-not-a-flag")
     assert proc.returncode == 2, proc.stdout + proc.stderr

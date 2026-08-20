@@ -149,7 +149,7 @@ The two lists are what the page said, and a page can say a great deal: long mess
 
 `failure` is `null` on a pass and one of `error`, `output-error`, `resource-error`, `timeout`, `navigation` or `http-status` otherwise. Exit code 1 is a declared outcome, not an error: the check ran and the verdict is on stdout, like `grep` finding nothing. Real errors (a wrong invocation, a missing browser, an internal failure) go to stderr as a one-line JSON envelope, `{"error": {"kind": ..., "message": ..., "hint": ...}}`, when the output format is JSON.
 
-`shinylive-check schema` prints the whole contract, commands, arguments, output fields, error kinds and exit codes, as machine-readable JSON in [The CLI Spec](https://clispec.dev) v0.3 dialect.
+`shinylive-check schema` prints the whole contract, commands, arguments, output fields, error kinds and exit codes, as machine-readable JSON in [The CLI Spec](https://clispec.dev) v0.3 dialect. It means the contract in every working directory, so reading the interface never depends on where you happen to stand; a directory named `schema` is checked as `./schema`. The `check` keyword resolves the other way, since it is only ever an alias: `shinylive-check check` with no target after it checks a directory named `check`.
 
 ## How it works
 
