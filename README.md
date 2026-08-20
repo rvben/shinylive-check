@@ -85,6 +85,9 @@ Exit codes:
 | 1 | the check failed; stdout carries the verdict |
 | 2 | usage error |
 | 4 | environment error: Chromium is not installed for playwright |
+| 5 | internal error: shinylive-check itself failed and reached no verdict |
+
+Exit 5 is deliberately not 1. A crash in the tool and a verdict of "this app is broken" are different facts, and a CI job that cannot tell them apart reports a tooling failure as a failing app. On exit 5 stdout stays empty and stderr carries the traceback above the JSON envelope, so the last line is still machine-readable.
 
 ## In CI
 
@@ -134,7 +137,7 @@ $ shinylive-check site | jq .
 }
 ```
 
-`failure` is `null` on a pass and one of `error`, `output-error`, `timeout`, `navigation` or `http-status` otherwise. Exit code 1 is a declared outcome, not an error: the check ran and the verdict is on stdout, like `grep` finding nothing. Real errors (a wrong invocation, a missing browser) go to stderr as a one-line JSON envelope, `{"error": {"kind": ..., "message": ..., "hint": ...}}`, when the output format is JSON.
+`failure` is `null` on a pass and one of `error`, `output-error`, `timeout`, `navigation` or `http-status` otherwise. Exit code 1 is a declared outcome, not an error: the check ran and the verdict is on stdout, like `grep` finding nothing. Real errors (a wrong invocation, a missing browser, an internal failure) go to stderr as a one-line JSON envelope, `{"error": {"kind": ..., "message": ..., "hint": ...}}`, when the output format is JSON.
 
 `shinylive-check schema` prints the whole contract, commands, arguments, output fields, error kinds and exit codes, as machine-readable JSON in [The CLI Spec](https://clispec.dev) v0.3 dialect.
 

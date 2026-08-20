@@ -127,7 +127,7 @@ SCHEMA = {
                 },
             ],
             "output_fields": _VERDICT_FIELDS,
-            "errors": ["usage", "unavailable"],
+            "errors": ["usage", "unavailable", "internal"],
             "outcomes": ["check_failed"],
             # Self-contained probe for conformance tooling: a refused loopback
             # connection produces a normal failure verdict (the check_failed
@@ -136,7 +136,10 @@ SCHEMA = {
         },
         {
             "name": "schema",
-            "description": "Print this contract as JSON",
+            "description": (
+                "Print this contract as JSON. The contract is always JSON; the "
+                "global --output selects the format of errors."
+            ),
             "effects": "read_only",
             "cardinality": "single",
             "output_fields": [
@@ -154,7 +157,7 @@ SCHEMA = {
                 {"name": "errors", "type": "array", "items": {"type": "object"}},
                 {"name": "outcomes", "type": "array", "items": {"type": "object"}},
             ],
-            "errors": [],
+            "errors": ["usage"],
         },
     ],
     "errors": [
@@ -173,6 +176,17 @@ SCHEMA = {
             "retryable": False,
             "description": (
                 "Chromium is not installed for playwright; run `playwright install chromium`."
+            ),
+        },
+        {
+            "kind": "internal",
+            "exit_code": 5,
+            "retryable": False,
+            "description": (
+                "shinylive-check itself failed and reached no verdict: an unexpected "
+                "error in the tool or the browser. stderr carries the traceback above "
+                "the envelope. Distinct from exit 1, which means the app was judged "
+                "and found broken."
             ),
         },
     ],

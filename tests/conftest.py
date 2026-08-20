@@ -43,12 +43,17 @@ def missing_package_site(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return export_app("missing_package", tmp_path_factory)
 
 
-def run_cli(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+def run_cli(
+    *args: str,
+    env: dict[str, str] | None = None,
+    cwd: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
     """The CLI exactly as a user runs it: a subprocess judged by exit code and output."""
     return subprocess.run(
         [sys.executable, "-m", "shinylive_check", *args],
         capture_output=True,
         text=True,
         env={**os.environ, **(env or {})},
+        cwd=None if cwd is None else str(cwd),
         timeout=600,
     )

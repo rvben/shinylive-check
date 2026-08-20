@@ -5,14 +5,36 @@ from __future__ import annotations
 import threading
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from io import BytesIO
 from pathlib import Path
+from typing import BinaryIO
 
 
 class _QuietHandler(SimpleHTTPRequestHandler):
-    """The default handler logs every request to stderr; the check needs silence."""
+    """Serves the export and nothing else, silently.
+
+    The default handler logs every request to stderr, which the check does not
+    want, and follows symlinks out of the served directory, which it must not:
+    an export is untrusted content (in the CI flow this tool is built for it can
+    trace back to a pull request), and the page it serves is running in a browser
+    with network access. A link resolving outside the export is refused, so the
+    check cannot be turned into a reader of arbitrary host files.
+    """
 
     def log_message(self, format: str, *args: object) -> None:
         pass
+
+    def send_head(self) -> BytesIO | BinaryIO | None:
+        root = Path(self.directory).resolve()
+        try:
+            target = Path(self.translate_path(self.path)).resolve()
+        except OSError:
+            self.send_error(404, "File not found")
+            return None
+        if target != root and root not in target.parents:
+            self.send_error(404, "File not found")
+            return None
+        return super().send_head()
 
 
 def serve_directory(directory: Path, port: int = 0) -> tuple[ThreadingHTTPServer, str]:

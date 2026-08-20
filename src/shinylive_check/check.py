@@ -11,6 +11,7 @@ errors, and the Shiny output elements inside the app frame.
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from playwright.sync_api import Error as PlaywrightError
@@ -47,6 +48,38 @@ _POLL_MILLIS = 500
 _SETTLE_MILLIS = 500
 _NAVIGATION_TIMEOUT_MILLIS = 30_000
 
+# Newlines and tabs survive because tracebacks need them; every other control
+# character is dropped.
+_KEEP_CONTROLS = frozenset("\n\t")
+
+# The page decides how long its errors are, so the tool has to decide how long its
+# verdict is. Comfortably more than any real traceback, far less than a CI log
+# budget. The head is kept because that is where the diagnosis lives.
+_MAX_REPORTED_CHARS = 10_000
+
+
+def _printable(text: str) -> str:
+    """Strip control characters from text the checked page chose, and bound it.
+
+    Console messages and page errors are written by the page, and the verdict
+    they land in is read in a terminal. Escape sequences there can erase lines
+    and move the cursor, so a hostile or broken page could repaint the check's
+    own verdict. Text is reported; control of the screen is not.
+
+    Length is bounded for the same reason: an app that dumps a large repr into
+    console.error would otherwise choose the size of this tool's stdout, and the
+    verdict is what a CI job stores and a script parses. The reported size is the
+    size before truncation, so a clipped error is never read as a short one.
+    """
+    clean = "".join(
+        char
+        for char in text
+        if char in _KEEP_CONTROLS or not (ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F)
+    )
+    if len(clean) <= _MAX_REPORTED_CHARS:
+        return clean
+    return f"{clean[:_MAX_REPORTED_CHARS]}... [truncated, {len(clean)} characters total]"
+
 
 @dataclass
 class ExpectResult:
@@ -73,13 +106,15 @@ def run_check(
     timeout: float = 180.0,
     expects: tuple[str, ...] = (),
     screenshot: str | None = None,
+    progress: Callable[[float], None] | None = None,
 ) -> CheckResult:
     """Load ``url``, wait for the app to render, and return the verdict.
 
     Passing means: the page loaded, no console or page error occurred, no Shiny
     output is in an error state, and either every ``expects`` selector became
     visible (when given) or at least one Shiny output rendered non-empty content
-    (the default). ``screenshot`` is captured only on failure.
+    (the default). ``screenshot`` is captured only on failure. ``progress`` is
+    called with the elapsed seconds on every poll, for callers reporting a wait.
     """
     start = time.monotonic()
     errors: list[str] = []
@@ -99,8 +134,8 @@ def run_check(
             url=url,
             seconds=round(time.monotonic() - start, 1),
             outputs=outputs,
-            errors=list(errors),
-            output_errors=list(output_errors or []),
+            errors=[_printable(error) for error in errors],
+            output_errors=[_printable(text) for text in output_errors or []],
             expects=[ExpectResult(sel, done) for sel, done in state.items()],
             failure=failure,
             screenshot=shot,
@@ -148,13 +183,25 @@ def run_check(
                 elif output_errors:
                     failure = "output-error"
                 elif rendered:
-                    # Let the page settle briefly: an error thrown right after the
-                    # first render still fails the check instead of racing it.
+                    # Let the page settle briefly: a failure right after the first
+                    # render still fails the check instead of racing it. Console
+                    # errors arrive as events, but an output that fails inside the
+                    # window is only visible to another scan, so the page is
+                    # re-scanned rather than just re-read.
                     page.wait_for_timeout(_SETTLE_MILLIS)
-                    failure = "error" if errors else None
+                    settled, output_errors = _scan_frames(page)
+                    outputs = max(outputs, settled)
+                    if errors:
+                        failure = "error"
+                    elif output_errors:
+                        failure = "output-error"
+                    else:
+                        failure = None
                 elif time.monotonic() > deadline:
                     failure = "timeout"
                 else:
+                    if progress is not None:
+                        progress(time.monotonic() - start)
                     page.wait_for_timeout(_POLL_MILLIS)
                     continue
 
@@ -202,11 +249,16 @@ def _scan_expects(page: Page, expect_state: dict[str, bool]) -> None:
 
 
 def _shoot(page: Page, path: str | None) -> str | None:
-    """Capture the failure screenshot when asked; never let it mask the verdict."""
+    """Capture the failure screenshot when asked; never let it mask the verdict.
+
+    Playwright writes the file itself, so a full disk or an unwritable directory
+    raises OSError rather than a PlaywrightError. Either way the verdict is what
+    the caller came for, and losing the screenshot must not cost them that.
+    """
     if path is None:
         return None
     try:
         page.screenshot(path=path, full_page=True)
-    except PlaywrightError:
+    except (PlaywrightError, OSError):
         return None
     return path

@@ -67,7 +67,10 @@ def test_schema_is_a_valid_clispec_contract():
     fields = {field["name"] for field in check["output_fields"]}
     assert fields >= {"target", "ok", "url", "seconds", "outputs", "errors", "failure"}
     kinds = {error["kind"]: error["exit_code"] for error in schema["errors"]}
-    assert kinds == {"usage": 2, "unavailable": 4}
+    # Every way the tool can fail without a verdict is declared, including the
+    # catch-all: an undeclared crash is indistinguishable from a judged failure.
+    assert kinds == {"usage": 2, "unavailable": 4, "internal": 5}
+    assert set(check["errors"]) == set(kinds)
     outcomes = {outcome["name"]: outcome["code"] for outcome in schema["outcomes"]}
     assert outcomes == {"check_failed": 1}
 
