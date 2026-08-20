@@ -127,7 +127,10 @@ SCHEMA = {
                     "name": "--timeout",
                     "type": "number",
                     "default": 180,
-                    "description": "Seconds to wait for the app to render before failing",
+                    "description": (
+                        "Seconds the whole check may take, loading the page included, "
+                        "before failing. Must be greater than zero"
+                    ),
                 },
                 {
                     "name": "--expect",

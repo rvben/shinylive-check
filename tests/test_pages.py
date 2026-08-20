@@ -15,6 +15,7 @@ import json
 import os
 import socket
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -76,6 +77,79 @@ def test_an_http_error_status_fails_as_http_status(tmp_path):
     verdict = json.loads(proc.stdout)
     assert verdict["failure"] == "http-status"
     assert "404" in " ".join(verdict["errors"])
+
+
+class _Blackhole:
+    """Accepts connections and never answers: a load that hangs rather than fails.
+
+    A refused connection fails instantly and so exercises nothing about waiting.
+    This is the shape that actually costs time in CI - a proxy, a load balancer or
+    an origin that holds the socket open with nothing behind it.
+    """
+
+    def __init__(self) -> None:
+        self._listener = socket.socket()
+        self._listener.bind(("127.0.0.1", 0))
+        self._listener.listen(8)
+        self._listener.settimeout(0.2)
+        self.port = self._listener.getsockname()[1]
+        self._held: list[socket.socket] = []
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._accept, daemon=True)
+        self._thread.start()
+
+    def _accept(self) -> None:
+        while not self._stop.is_set():
+            try:
+                conn, _ = self._listener.accept()
+            except TimeoutError:
+                continue
+            except OSError:
+                return
+            self._held.append(conn)
+
+    def close(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=5)
+        for conn in self._held:
+            conn.close()
+        self._listener.close()
+
+
+def test_the_timeout_governs_loading_the_page_too(tmp_path):
+    """`--timeout` is the budget for the whole check, navigation included.
+
+    Loading the page had its own hardcoded 30 second limit, so `--timeout 3`
+    against a server that accepts and never answers took 31.4 seconds measured end
+    to end. A timeout flag a run can exceed by an order of magnitude is not a
+    timeout: the number exists so a CI job can bound its own wall time.
+    """
+    hole = _Blackhole()
+    try:
+        started = time.monotonic()
+        proc = run_cli(f"http://127.0.0.1:{hole.port}/", "--timeout", "3", "-o", "json")
+        elapsed = time.monotonic() - started
+    finally:
+        hole.close()
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert json.loads(proc.stdout)["failure"] == "navigation"
+    # Generous: the budget is 3s and a browser launch is about a second. The
+    # behaviour this excludes took 31s.
+    assert elapsed < 20, f"a 3s timeout took {elapsed:.1f}s"
+
+
+def test_a_timeout_of_zero_is_a_usage_error(tmp_path):
+    """Zero is the one value playwright reads as "wait forever".
+
+    Passing the remaining budget straight through would turn the smallest possible
+    timeout into an unbounded wait, which is the opposite of what was asked for.
+    Rejecting it at the edge is clearer than clamping it silently.
+    """
+    proc = run_cli(str(page(tmp_path, RENDERED, name="zero")), "--timeout", "0")
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    envelope = json.loads(proc.stderr.strip().splitlines()[-1])
+    assert envelope["error"]["kind"] == "usage"
+    assert "--timeout" in envelope["error"]["message"]
 
 
 def test_a_refused_connection_fails_as_navigation():

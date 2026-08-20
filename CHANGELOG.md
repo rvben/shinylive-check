@@ -44,6 +44,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--expect "#loading" --expect "#chart"` passed on a page that showed a spinner
   and then failed. They must now be visible at the same moment, and the verdict
   reports the state at the end of the check rather than a high-water mark.
+- `--timeout` did not govern loading the page. Navigation had its own hardcoded
+  30 second limit, so a check pointed at a host that accepts the connection and
+  then never answers took 30.7 s to give up on a `--timeout 3`, and no value
+  below 30 could shorten it. `--timeout` is now the budget for the whole check,
+  page load included. A non-positive `--timeout` is a usage error rather than a
+  silent wait forever, which is how the browser reads a zero timeout.
 - A Shiny output that entered an error state during the 500 ms settle window was
   reported as a pass. Console errors arrive as events and were re-read, but an
   output failing inside the window is DOM state and was only visible to another

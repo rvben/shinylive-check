@@ -59,7 +59,6 @@ _FRAME_SCAN = """
 
 _POLL_MILLIS = 500
 _SETTLE_MILLIS = 500
-_NAVIGATION_TIMEOUT_MILLIS = 30_000
 
 # Newlines and tabs survive because tracebacks need them; every other control
 # character is dropped.
@@ -241,9 +240,10 @@ def run_check(
                 lambda msg: errors.append(msg.text) if msg.type == "error" else None,
             )
 
+            deadline = start + timeout
             try:
                 response = page.goto(
-                    url, wait_until="domcontentloaded", timeout=_NAVIGATION_TIMEOUT_MILLIS
+                    url, wait_until="domcontentloaded", timeout=_remaining_millis(deadline)
                 )
             except PlaywrightError as err:
                 errors.append(str(err))
@@ -252,7 +252,6 @@ def run_check(
                 errors.append(f"HTTP {response.status} for {url}")
                 return result(ok=False, failure="http-status", shot=_shoot(page, screenshot))
 
-            deadline = start + timeout
             expect_state = dict.fromkeys(expects, False)
             scan = _Scan(outputs=0, output_errors=[], shiny_detected=False)
 
@@ -304,6 +303,17 @@ def run_check(
                 )
         finally:
             browser.close()
+
+
+def _remaining_millis(deadline: float) -> int:
+    """What is left of the caller's budget, as a playwright timeout.
+
+    Never zero: playwright reads a zero timeout as "wait forever", so a budget
+    that has just run out would become an unbounded wait, which is the opposite of
+    what a timeout means. The CLI rejects a non-positive ``--timeout`` outright;
+    this keeps the same promise for anyone calling ``run_check`` directly.
+    """
+    return max(1, int((deadline - time.monotonic()) * 1000))
 
 
 def _satisfied(scan: _Scan, expect_state: dict[str, bool], expects: tuple[str, ...]) -> bool:

@@ -94,7 +94,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=180.0,
         metavar="SECONDS",
-        help="seconds to wait for the app to render before failing (default: %(default)s)",
+        help="seconds the whole check may take, loading the page included, before "
+        "failing (default: %(default)s)",
     )
     parser.add_argument(
         "--expect",
@@ -260,6 +261,9 @@ def _dispatch(args_list: list[str]) -> int:
 
         args = build_parser().parse_args(args_list)
         fmt = _resolve_format(None if args.output == "auto" else args.output)
+
+        if args.timeout <= 0:
+            raise UsageError(f"--timeout must be greater than zero, got {args.timeout:g}")
 
         if args.target.startswith(("http://", "https://")):
             if args.port:
