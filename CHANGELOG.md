@@ -39,6 +39,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `interrupted` error kind on stderr rather than a traceback, and leaves no
   browser behind. The code is deliberately not 1, so a wrapper cannot read an
   abandoned run as an app that was judged and found broken.
+- `--` did not end the flags when the output format was worked out. A target
+  named `-ojson` sitting after the marker was read as a format request as well as
+  a target, so `shinylive-check -- -ojson extra` answered its usage error on a
+  terminal as a JSON envelope with the usage block dropped, decided by what the
+  directory happened to be called. The search now stops at the marker the way
+  argparse does; a request made before it still stands.
 - `--expect` certified a genuinely dead app. An export serves its HTML shell
   before pyodide boots, so a selector naming anything in that shell was satisfied
   by a page the runtime never reached: against an app that raises at import,

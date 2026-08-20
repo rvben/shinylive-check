@@ -157,6 +157,21 @@ def test_the_requested_format_is_read_from_every_accepted_spelling():
     assert _requested_format(["-ojson", "site"]) == "json"
 
 
+def test_the_end_of_options_marker_stops_the_format_search():
+    """After `--` a token is a target, however much it looks like a flag.
+
+    A directory named `-ojson` is a legal argument there, and argparse reads it as
+    the target. Reading it as a format request as well changed what the user saw:
+    `shinylive-check -- -ojson extra` on a terminal answered its usage error as a
+    JSON envelope, usage block dropped, because of what the directory was called.
+    """
+    assert _requested_format(["--", "-ojson", "extra"]) is None
+    assert _requested_format(["--", "-o", "json"]) is None
+    # A request made before the marker still stands, and one after cannot revise
+    # it: the marker ends the flags, it does not undo them.
+    assert _requested_format(["-o", "json", "--", "-o", "text"]) == "json"
+
+
 def test_an_absent_or_unusable_format_request_reads_as_unset():
     assert _requested_format(["site"]) is None
     assert _requested_format(["-o", "auto", "site"]) is None

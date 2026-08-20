@@ -142,6 +142,11 @@ def _requested_format(args_list: list[str]) -> str | None:
     """The explicitly requested output format, readable even when parsing failed."""
     fmt = None
     for position, token in enumerate(args_list):
+        if token == "--":
+            # Past the marker every token is a target, whatever it is spelled
+            # like, so a request read out of one would be a directory name taken
+            # as an instruction. A request made before it still stands.
+            break
         if token in ("-o", "--output") and position + 1 < len(args_list):
             fmt = args_list[position + 1]
         elif token.startswith("--output="):
