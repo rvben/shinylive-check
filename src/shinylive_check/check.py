@@ -55,13 +55,38 @@ _KEEP_CONTROLS = frozenset("\n\t")
 # The page decides how long its errors are, so the tool has to decide how long its
 # verdict is. Comfortably more than any real traceback, far less than a CI log
 # budget. The head is kept because that is where the diagnosis lives.
-_MAX_REPORTED_CHARS = 10_000
+#
+# Spent in ENCODED bytes, not characters: the verdict is JSON, which escapes
+# non-ASCII, so one emoji costs twelve bytes and a character cap bounds nothing a
+# CI job actually stores.
+_MAX_REPORTED_BYTES = 10_000
 
 # Bounding each message is not bounding the verdict: an app erroring inside a
 # render or reconnect loop emits thousands before the first poll sees any of them,
 # and the count then carries the size the length cap just removed. The earliest
 # errors are kept because a cascade's root cause is at its start.
 _MAX_REPORTED_ITEMS = 50
+
+
+def _json_cost(char: str) -> int:
+    """Bytes this character costs once JSON-encoded, ASCII-safe.
+
+    Exact for the alphabet that survives ``_printable``'s stripping, which is
+    what it is used on. The three characters where this would disagree with
+    ``json.dumps`` (backspace, form feed, DEL) are all stripped before costing,
+    and a test pins that agreement across the whole surviving range.
+    """
+    code = ord(char)
+    if code > 0xFFFF:
+        # Encoded as a surrogate pair, so two \uXXXX escapes.
+        return 12
+    if code > 0x7F:
+        return 6
+    if char in '"\\':
+        return 2
+    if code < 0x20:
+        return 2
+    return 1
 
 
 def _printable(text: str) -> str:
@@ -72,19 +97,24 @@ def _printable(text: str) -> str:
     and move the cursor, so a hostile or broken page could repaint the check's
     own verdict. Text is reported; control of the screen is not.
 
-    Length is bounded for the same reason: an app that dumps a large repr into
+    Size is bounded for the same reason: an app that dumps a large repr into
     console.error would otherwise choose the size of this tool's stdout, and the
-    verdict is what a CI job stores and a script parses. The reported size is the
-    size before truncation, so a clipped error is never read as a short one.
+    verdict is what a CI job stores and a script parses. The budget is spent in
+    encoded bytes, so the ceiling does not depend on the alphabet the page picked.
+    The reported size is the size before truncation, so a clipped error is never
+    read as a short one.
     """
     clean = "".join(
         char
         for char in text
         if char in _KEEP_CONTROLS or not (ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F)
     )
-    if len(clean) <= _MAX_REPORTED_CHARS:
-        return clean
-    return f"{clean[:_MAX_REPORTED_CHARS]}... [truncated, {len(clean)} characters total]"
+    spent = 0
+    for index, char in enumerate(clean):
+        spent += _json_cost(char)
+        if spent > _MAX_REPORTED_BYTES:
+            return f"{clean[:index]}... [truncated, {len(clean)} characters total]"
+    return clean
 
 
 def _bounded(items: list[str]) -> list[str]:

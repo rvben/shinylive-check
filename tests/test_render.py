@@ -7,9 +7,17 @@ than left to the handful of browser tests that happen to render text.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
-from shinylive_check.check import CheckResult, ExpectResult
+from shinylive_check.check import (
+    _KEEP_CONTROLS,
+    CheckResult,
+    ExpectResult,
+    _bounded,
+    _json_cost,
+    _printable,
+)
 from shinylive_check.cli import _heartbeat, _requested_format, render_text
 
 
@@ -108,6 +116,53 @@ def test_an_absent_or_unusable_format_request_reads_as_unset():
     assert _requested_format(["-o", "auto", "site"]) is None
     assert _requested_format(["-o"]) is None
     assert _requested_format(["--output=nonsense"]) is None
+
+
+def test_the_json_cost_model_agrees_with_the_encoder_it_predicts():
+    """The size bound is only as honest as this arithmetic.
+
+    `_printable` spends a byte budget using `_json_cost` rather than encoding
+    each candidate prefix, so if the model ever disagreed with `json.dumps` the
+    verdict would quietly exceed its stated ceiling again. Every character that
+    survives stripping is checked against the real encoder, which is the only
+    authority on what a character costs.
+    """
+    survivors = [
+        chr(code)
+        for code in [*range(0, 0x2000), 0x1F4A5, 0x1F600, 0x10FFFF]
+        if chr(code) in _KEEP_CONTROLS or not (code < 0x20 or 0x7F <= code <= 0x9F)
+    ]
+    assert len(survivors) > 8000, "the sample has to actually cover the range"
+    wrong = [(hex(ord(c)), _json_cost(c), len(json.dumps(c)) - 2) for c in survivors]
+    assert [entry for entry in wrong if entry[1] != entry[2]] == []
+
+
+def test_a_bounded_message_stays_under_its_byte_ceiling_in_any_alphabet():
+    """Emoji and ASCII have to hit the same ceiling, which was the F24 defect."""
+    for char in ("A", "\U0001f4a5", "é", "\t"):
+        reported = _printable(char * 50_000)
+        encoded = len(json.dumps(reported)) - 2
+        assert encoded < 11_000, f"{char!r} encoded to {encoded} bytes"
+        assert "truncated, 50000 characters total" in reported
+
+
+def test_no_page_can_push_a_reported_list_past_its_ceiling():
+    """The property, not another scenario.
+
+    This bound has now been relocated three times: capping message length left
+    the count unbounded, capping the count left the alphabet unbounded, and each
+    time the tests written for the previous shape still passed. Those are
+    scenarios; this is the invariant they were each approximating, asserted over
+    the shapes an attacker actually picks - one enormous message, many messages,
+    a wide alphabet, and the combinations.
+    """
+    alphabets = ("A", '"', "\U0001f4a5", "é", "\n", "\U0001f4a5A")
+    shapes = ((1, 5_000_000), (100_000, 50), (5_000, 5_000))
+    for char in alphabets:
+        for count, length in shapes:
+            reported = _bounded([char * length] * count)
+            encoded = len(json.dumps(reported))
+            assert encoded < 600_000, f"{char!r} x{count} of {length} gave {encoded} bytes"
 
 
 def test_the_heartbeat_reports_no_more_often_than_its_interval():

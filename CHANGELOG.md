@@ -45,10 +45,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   under the verdict, so it cannot repaint the terminal or forge a headline.
 - The checked page could choose the size of this tool's stdout, which is what a
   CI job stores and a script has to parse. A 20 MB console error produced a 20 MB
-  JSON verdict, and 5,000 smaller ones produced 50 MB. Messages are now truncated
-  at 10,000 characters and the lists clipped to the earliest 50, each with a
-  marker naming what was dropped, which bounds the verdict at roughly 500 KB
-  regardless of the page.
+  JSON verdict, 5,000 smaller ones produced 50 MB, and 200 errors written in
+  emoji produced 6 MB because JSON escapes each one to twelve bytes. Messages are
+  now truncated at 10,000 encoded bytes and the lists clipped to the earliest 50,
+  each with a marker naming what was dropped, which bounds the verdict at roughly
+  500 KB whatever the page says and in whatever alphabet.
 
 ## [0.1.0] - 2026-08-20
 

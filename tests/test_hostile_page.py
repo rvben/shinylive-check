@@ -80,6 +80,36 @@ def test_an_enormous_console_error_cannot_blow_up_the_verdict(tmp_path):
     assert "5242881" in reported
 
 
+def test_a_page_speaking_emoji_cannot_blow_up_the_verdict(tmp_path):
+    """Counting characters does not bound bytes, and bytes are what CI stores.
+
+    `json.dumps` defaults to ASCII-safe output, so one astral character leaves as
+    a surrogate pair spelled `\\ud83d\\udca5`: twelve bytes for one character. A
+    cap counting characters therefore bounds nothing a CI job cares about, and
+    measured before this was fixed, 200 errors of 20,000 emoji each produced a
+    6,002,759-byte verdict from caps that were supposed to hold it near 500 KB.
+
+    The budget is spent in encoded bytes now, so the ceiling is the same whatever
+    alphabet the page chooses.
+    """
+    site = tmp_path / "emoji"
+    site.mkdir()
+    (site / "index.html").write_text(
+        "<html><body><script>"
+        "var burst = String.fromCodePoint(0x1F4A5).repeat(20000);"
+        "for (var i = 0; i < 200; i++) { console.error(burst); }"
+        "</script></body></html>"
+    )
+    proc = run_cli(str(site), "--timeout", "25", "-o", "json")
+    assert proc.returncode == 1, proc.stderr
+    assert len(proc.stdout) < 1_500_000, f"verdict was {len(proc.stdout)} bytes"
+    verdict = json.loads(proc.stdout)
+    assert verdict["errors_total"] == 200
+    # The text survived as text: bounding it must not corrupt what it reports.
+    assert verdict["errors"][0].startswith("\U0001f4a5")
+    assert "truncated" in verdict["errors"][0]
+
+
 def test_many_console_errors_cannot_blow_up_the_verdict(tmp_path):
     """Bounding each message is not bounding the verdict.
 
