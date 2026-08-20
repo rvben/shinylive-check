@@ -445,6 +445,52 @@ def test_a_render_that_vanishes_during_the_settle_window_is_not_a_pass(tmp_path)
     assert verdict["shiny_detected"] is True
 
 
+def test_an_output_that_keeps_flickering_cannot_outlast_the_timeout(tmp_path):
+    """The budget has to bound the settle window too, or it bounds nothing.
+
+    Withdrawing a pass sends the loop back to waiting, and that path did not
+    consult the deadline: only the branch for a page that has not rendered did.
+    A page that is satisfied at the top of every pass and unsatisfied after every
+    settle therefore looped forever, 500 ms at a time, and `--timeout 3` was
+    measured still running after 60 seconds with nothing on stdout. That is the
+    held-until-the-job-timeout failure this tool exists to prevent, arriving from
+    the tool itself.
+
+    The flicker is made exact rather than raced: reading the element's markup is
+    what alternates it, so every scan sees the opposite of the scan before,
+    whatever the machine's timing. A real app cannot usually align that precisely,
+    but the point is that nothing bounded it, and a bound that holds only for
+    pages that flicker at the wrong frequency is not a bound.
+    """
+    site = page(
+        tmp_path,
+        """
+<div id="one" class="shiny-bound-output"></div>
+<script>
+  var reads = 0;
+  Object.defineProperty(document.getElementById("one"), "innerHTML", {
+    get: function () { reads += 1; return reads % 2 === 1 ? "rendered" : ""; }
+  });
+</script>""",
+        name="flickering",
+    )
+    try:
+        # Eight seconds rather than the three that reproduced it: the budget covers
+        # launching Chromium, and a loaded machine can spend three seconds there
+        # alone, which answers `navigation` before the loop under test is reached.
+        # A page that never renders spends the whole budget whatever it is, so the
+        # room is free here in a way it is not for a real export.
+        proc = run_cli(str(site), "--timeout", "8", "-o", "json", timeout=90)
+    except subprocess.TimeoutExpired as expired:
+        raise AssertionError("the check never returned: --timeout did not bound it") from expired
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    verdict = json.loads(proc.stdout)
+    # Never stably rendered is what a timeout means, and the budget is the budget:
+    # one settle window and the browser's own teardown land on top of it.
+    assert verdict["failure"] == "timeout", verdict
+    assert verdict["seconds"] < 15, verdict["seconds"]
+
+
 def test_expect_selectors_must_be_satisfied_at_the_same_moment(tmp_path):
     """Two selectors that are never visible together do not add up to a pass.
 

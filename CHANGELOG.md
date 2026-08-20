@@ -32,6 +32,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- An app whose output kept appearing and disappearing ran forever, ignoring
+  `--timeout` entirely. The check consulted its deadline only while waiting for a
+  first render; the other way back to waiting, a settle window withdrawing a pass
+  because the output went away again, returned to the top of the loop without
+  ever asking the clock. A page in that state was measured still running 60
+  seconds into a `--timeout 3` check, with nothing on stdout, which in CI means a
+  runner held until the job timeout. Out of budget having never rendered stably
+  is now reported as a timeout, like any other app that did not render.
 - Ctrl-C did not stop a check. The interrupt unwound the connection to the
   browser and the teardown then asked that connection to close the browser, so
   the reply never came: the run hung until it was killed, which in CI means a

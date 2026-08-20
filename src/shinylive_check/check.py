@@ -326,8 +326,13 @@ def run_check(
                     if failure is None and not _satisfied(scan, expect_state, expects):
                         # It held, then stopped holding. That is not a pass, and it
                         # is not yet a failure either: the app may simply be
-                        # mid-rerender, so the condition has to be met again.
-                        continue
+                        # mid-rerender, so the condition has to be met again -
+                        # while there is budget left to meet it in. Waiting again
+                        # without asking the clock is how a page that renders and
+                        # unrenders on every scan outlasted its own timeout.
+                        if time.monotonic() <= deadline:
+                            continue
+                        failure = "timeout"
                 elif failure is None:
                     if time.monotonic() > deadline:
                         failure = "timeout"
