@@ -326,8 +326,11 @@ def render_text(result: CheckResult) -> str:
         return line
 
     headlines = {
-        "error": f"{len(result.errors)} console/page error(s)",
-        "output-error": f"{len(result.output_errors)} Shiny output error(s)",
+        # The counts are what OCCURRED, not what is listed below: the lists are
+        # clipped for a page that errors in a loop, and a headline reading the
+        # clipped length would understate the damage with a plausible number.
+        "error": f"{result.errors_total} console/page error(s)",
+        "output-error": f"{result.output_errors_total} Shiny output error(s)",
         # Wall time, not the requested timeout: it includes the browser launch, so
         # claiming a window the number then exceeds reads as a bug in the tool.
         "timeout": f"app did not render (waited {result.seconds:.1f}s)",

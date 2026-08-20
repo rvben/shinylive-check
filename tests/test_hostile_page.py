@@ -80,6 +80,48 @@ def test_an_enormous_console_error_cannot_blow_up_the_verdict(tmp_path):
     assert "5242881" in reported
 
 
+def test_many_console_errors_cannot_blow_up_the_verdict(tmp_path):
+    """Bounding each message is not bounding the verdict.
+
+    A per-message cap still lets the count carry the size: an app erroring inside
+    a render or reconnect loop emits thousands before the first poll sees any of
+    them. Capping the list is what actually bounds the output, and the true count
+    has to survive the cap: a verdict reporting 51 errors when 2000 occurred is a
+    plausible number that is wrong, which is worse than an obviously clipped one.
+    """
+    site = tmp_path / "many"
+    site.mkdir()
+    (site / "index.html").write_text(
+        "<html><body><script>"
+        'for (let i = 0; i < 2000; i++) { console.error("E" + i + ":" + "X".repeat(2000)); }'
+        "</script></body></html>"
+    )
+    proc = run_cli(str(site), "--timeout", "20", "-o", "json")
+    assert proc.returncode == 1, proc.stderr
+    assert len(proc.stdout) < 250_000, f"verdict was {len(proc.stdout)} bytes"
+    verdict = json.loads(proc.stdout)
+    assert verdict["errors_total"] == 2000
+    assert len(verdict["errors"]) < 2000
+    # The first errors are kept because that is where the root cause is, and the
+    # reader is told what was dropped.
+    assert verdict["errors"][0].startswith("E0:")
+    assert "omitted" in verdict["errors"][-1]
+
+
+def test_a_truncated_error_list_still_reports_the_true_count_in_text(tmp_path):
+    """The headline is the one line most readers act on; it cannot understate."""
+    site = tmp_path / "many-text"
+    site.mkdir()
+    (site / "index.html").write_text(
+        "<html><body><script>"
+        'for (let i = 0; i < 2000; i++) { console.error("E" + i); }'
+        "</script></body></html>"
+    )
+    proc = run_cli(str(site), "--timeout", "20", "-o", "text")
+    assert proc.returncode == 1, proc.stderr
+    assert proc.stdout.splitlines()[0].startswith("FAIL (error): 2000 console/page error(s)")
+
+
 def test_the_error_text_is_still_reported(tmp_path):
     """Sanitizing must not swallow the diagnosis: the message still gets through."""
     proc = run_cli(str(hostile_site(tmp_path)), "--timeout", "15", "-o", "json")

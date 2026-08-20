@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A cold pyodide boot against the 180 second default timeout was previously
   silent for long enough to read as a hung job.
 - Examples and an exit-code table in `--help`.
+- `errors_total` and `output_errors_total` in the JSON verdict: the numbers that
+  occurred, which exceed the list lengths once a list is clipped. The text
+  headline reports these, so it cannot understate a failure with a number that
+  looks real.
 
 ### Fixed
 
@@ -39,10 +43,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   containing a link to a file elsewhere on the host served that file to the page.
 - Text chosen by the checked page is stripped of control characters and indented
   under the verdict, so it cannot repaint the terminal or forge a headline.
-- Reported page text is truncated at 10,000 characters, with the true length
-  named in the marker. An app dumping a large repr into `console.error` used to
-  choose the size of this tool's stdout: a 20 MB error produced a 20 MB JSON
-  verdict, which is what a CI job stores and a script has to parse.
+- The checked page could choose the size of this tool's stdout, which is what a
+  CI job stores and a script has to parse. A 20 MB console error produced a 20 MB
+  JSON verdict, and 5,000 smaller ones produced 50 MB. Messages are now truncated
+  at 10,000 characters and the lists clipped to the earliest 50, each with a
+  marker naming what was dropped, which bounds the verdict at roughly 500 KB
+  regardless of the page.
 
 ## [0.1.0] - 2026-08-20
 

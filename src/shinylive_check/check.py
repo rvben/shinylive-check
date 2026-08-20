@@ -57,6 +57,12 @@ _KEEP_CONTROLS = frozenset("\n\t")
 # budget. The head is kept because that is where the diagnosis lives.
 _MAX_REPORTED_CHARS = 10_000
 
+# Bounding each message is not bounding the verdict: an app erroring inside a
+# render or reconnect loop emits thousands before the first poll sees any of them,
+# and the count then carries the size the length cap just removed. The earliest
+# errors are kept because a cascade's root cause is at its start.
+_MAX_REPORTED_ITEMS = 50
+
 
 def _printable(text: str) -> str:
     """Strip control characters from text the checked page chose, and bound it.
@@ -81,6 +87,20 @@ def _printable(text: str) -> str:
     return f"{clean[:_MAX_REPORTED_CHARS]}... [truncated, {len(clean)} characters total]"
 
 
+def _bounded(items: list[str]) -> list[str]:
+    """Sanitize a page-controlled list, keeping its head and naming what was cut.
+
+    The companion count (``errors_total``) is what keeps this honest: a reader
+    must never mistake the length of a clipped list for the number of things that
+    actually went wrong.
+    """
+    kept = [_printable(item) for item in items[:_MAX_REPORTED_ITEMS]]
+    dropped = len(items) - len(kept)
+    if dropped:
+        kept.append(f"... [{dropped} further omitted, {len(items)} total]")
+    return kept
+
+
 @dataclass
 class ExpectResult:
     selector: str
@@ -94,7 +114,10 @@ class CheckResult:
     seconds: float
     outputs: int
     errors: list[str]
+    # The number that OCCURRED, which is not len(errors) once the list is clipped.
+    errors_total: int
     output_errors: list[str]
+    output_errors_total: int
     expects: list[ExpectResult]
     failure: str | None
     screenshot: str | None
@@ -129,13 +152,16 @@ def run_check(
         shot: str | None = None,
     ) -> CheckResult:
         state = expect_state or dict.fromkeys(expects, False)
+        page_errors = output_errors or []
         return CheckResult(
             ok=ok,
             url=url,
             seconds=round(time.monotonic() - start, 1),
             outputs=outputs,
-            errors=[_printable(error) for error in errors],
-            output_errors=[_printable(text) for text in output_errors or []],
+            errors=_bounded(errors),
+            errors_total=len(errors),
+            output_errors=_bounded(page_errors),
+            output_errors_total=len(page_errors),
             expects=[ExpectResult(sel, done) for sel, done in state.items()],
             failure=failure,
             screenshot=shot,

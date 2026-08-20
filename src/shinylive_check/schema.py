@@ -22,13 +22,30 @@ _VERDICT_FIELDS = [
         "name": "errors",
         "type": "array",
         "items": {"type": "string"},
-        "description": "Console errors and uncaught page errors, in order",
+        "description": (
+            "Console errors and uncaught page errors, in order. Long messages are "
+            "truncated and the list is clipped to the earliest 50, so use "
+            "errors_total for the count"
+        ),
+    },
+    {
+        "name": "errors_total",
+        "type": "integer",
+        "description": "Console and page errors that occurred, which may exceed len(errors)",
     },
     {
         "name": "output_errors",
         "type": "array",
         "items": {"type": "string"},
-        "description": "Messages of Shiny outputs in an error state",
+        "description": (
+            "Messages of Shiny outputs in an error state, truncated and clipped "
+            "like errors; use output_errors_total for the count"
+        ),
+    },
+    {
+        "name": "output_errors_total",
+        "type": "integer",
+        "description": "Shiny outputs in an error state, which may exceed len(output_errors)",
     },
     {
         "name": "expects",

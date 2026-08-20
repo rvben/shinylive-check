@@ -26,6 +26,10 @@ def verdict(**overrides: Any) -> CheckResult:
         "screenshot": None,
     }
     fields.update(overrides)
+    # The totals default to the lists' own lengths: a verdict built here is an
+    # unclipped one unless a test says otherwise.
+    fields.setdefault("errors_total", len(fields["errors"]))
+    fields.setdefault("output_errors_total", len(fields["output_errors"]))
     return CheckResult(**fields)
 
 
