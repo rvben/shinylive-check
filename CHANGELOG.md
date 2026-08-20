@@ -32,6 +32,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Ctrl-C did not stop a check. The interrupt unwound the connection to the
+  browser and the teardown then asked that connection to close the browser, so
+  the reply never came: the run hung until it was killed, which in CI means a
+  runner held until the job timeout. It now stops at once, exits 130 with an
+  `interrupted` error kind on stderr rather than a traceback, and leaves no
+  browser behind. The code is deliberately not 1, so a wrapper cannot read an
+  abandoned run as an app that was judged and found broken.
 - `--expect` certified a genuinely dead app. An export serves its HTML shell
   before pyodide boots, so a selector naming anything in that shell was satisfied
   by a page the runtime never reached: against an app that raises at import,

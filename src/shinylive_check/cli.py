@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import traceback
 from collections.abc import Callable
@@ -22,6 +23,9 @@ EXIT_FAILED = 1
 EXIT_USAGE = 2
 EXIT_ENVIRONMENT = 4
 EXIT_INTERNAL = 5
+# What a shell reports for a command stopped by SIGINT, so a wrapper script reads
+# the same number here that it reads from anything else the user interrupted.
+EXIT_INTERRUPTED = 130
 
 # A cold pyodide boot is tens of megabytes of wasm and the default timeout is three
 # minutes, so the wait gets a pulse: silence for that long reads as a hung job.
@@ -34,11 +38,12 @@ examples:
   shinylive-check site --expect "#plot"     require a specific element to appear
 
 exit codes:
-  0  the app booted and rendered
-  1  the check failed; stdout carries the verdict
-  2  usage error
-  4  environment error: Chromium is not installed for playwright
-  5  internal error: shinylive-check itself failed
+    0  the app booted and rendered
+    1  the check failed; stdout carries the verdict
+    2  usage error
+    4  environment error: Chromium is not installed for playwright
+    5  internal error: shinylive-check itself failed
+  130  interrupted before a verdict was reached
 
 `shinylive-check schema` prints the machine-readable contract; pass ./schema to
 check a directory of that name.
@@ -274,11 +279,37 @@ def _serve(site: Path, port: int) -> tuple[ThreadingHTTPServer, str]:
         ) from err
 
 
+def _leave_now(code: int) -> NoReturn:
+    """Exit without running interpreter shutdown, streams flushed first.
+
+    Returning normally would let the browser driver's event loop be collected with
+    a request still in flight, and it complains about that on stderr - after the
+    envelope, taking the last line, which is the line a script parses. There is
+    nothing left to do by then: the driver is a child process reading a pipe that
+    closes when this one exits, and it takes the browser with it.
+    """
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the CLI, and let nothing out of here except a documented exit code."""
     args_list = sys.argv[1:] if argv is None else argv
     try:
         return _dispatch(args_list)
+    except KeyboardInterrupt:
+        # Stopping the run is something the caller asked for, so it is reported
+        # rather than dumped: a traceback here says the tool broke. The number is
+        # the one a shell reports for the same interrupt, and it is not 1, because
+        # a wrapper must not read an abandoned check as an app that failed.
+        _render_error(
+            "interrupted",
+            "interrupted before a verdict was reached",
+            EXIT_INTERRUPTED,
+            fmt=_resolve_format(_requested_format(args_list)),
+        )
+        _leave_now(EXIT_INTERRUPTED)
     except Exception as err:
         # The traceback is the whole value of an unexpected failure, so it goes to
         # stderr above the envelope, leaving the last line machine-readable.

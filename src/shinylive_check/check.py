@@ -273,6 +273,7 @@ def run_check(
                 raise BrowserMissingError(str(err)) from err
             raise
 
+        interrupted = False
         try:
             page = browser.new_page()
 
@@ -346,8 +347,16 @@ def run_check(
                     failure=failure,
                     shot=None if ok else _shoot(page, screenshot),
                 )
+        except KeyboardInterrupt:
+            # Closing the browser is a request-and-reply over the connection the
+            # interrupt just unwound, so the reply never comes and Ctrl-C hangs
+            # instead of stopping the check. Leaving is safe: the driver exits
+            # with this process and takes the browser with it.
+            interrupted = True
+            raise
         finally:
-            browser.close()
+            if not interrupted:
+                browser.close()
 
 
 def _remaining_millis(deadline: float) -> int:

@@ -188,7 +188,7 @@ SCHEMA = {
                 },
             ],
             "output_fields": _VERDICT_FIELDS,
-            "errors": ["usage", "unavailable", "internal"],
+            "errors": ["usage", "unavailable", "internal", "interrupted"],
             "outcomes": ["check_failed"],
             # Self-contained probe for conformance tooling: a refused loopback
             # connection produces a normal failure verdict (the check_failed
@@ -248,6 +248,17 @@ SCHEMA = {
                 "error in the tool or the browser. stderr carries the traceback above "
                 "the envelope. Distinct from exit 1, which means the app was judged "
                 "and found broken."
+            ),
+        },
+        {
+            "kind": "interrupted",
+            "exit_code": 130,
+            "retryable": True,
+            "description": (
+                "The run was stopped by SIGINT before it reached a verdict. The code "
+                "is the one a shell reports for the same interrupt, and it is "
+                "deliberately not 1: nothing was judged, so a wrapper must not read "
+                "an abandoned check as an app that failed."
             ),
         },
     ],
