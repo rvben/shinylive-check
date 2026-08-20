@@ -1,8 +1,12 @@
 """CLI contract without a browser: usage errors, --version, the schema command."""
 
 import json
+from dataclasses import fields
 
 from conftest import run_cli
+
+from shinylive_check.check import CheckResult
+from shinylive_check.schema import SCHEMA
 
 
 def test_no_target_is_a_usage_error():
@@ -73,6 +77,28 @@ def test_schema_is_a_valid_clispec_contract():
     assert set(check["errors"]) == set(kinds)
     outcomes = {outcome["name"]: outcome["code"] for outcome in schema["outcomes"]}
     assert outcomes == {"check_failed": 1}
+
+
+def test_every_verdict_field_is_declared_in_the_schema_and_no_others():
+    """The schema is the contract, so it has to describe the verdict exactly.
+
+    Equality, not containment: the failure this guards is a field added to the
+    verdict and forgotten in the schema, which an agent reading the contract
+    then cannot discover, and a stale schema entry for a field no longer emitted,
+    which is worse because it reads as a promise. Both directions were live risks
+    when errors_total and output_errors_total were added by hand to each file.
+
+    `target` is the one verdict key that is not a CheckResult field; the CLI adds
+    it when serialising, so it is named here rather than derived.
+    """
+    declared = {
+        field["name"]
+        for command in SCHEMA["commands"]
+        if command["name"] == "check"
+        for field in command["output_fields"]
+    }
+    emitted = {field.name for field in fields(CheckResult)} | {"target"}
+    assert declared == emitted
 
 
 def test_check_subcommand_is_an_alias_for_the_bare_target(tmp_path):

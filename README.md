@@ -130,12 +130,16 @@ $ shinylive-check site | jq .
   "seconds": 4.7,
   "outputs": 1,
   "errors": [],
+  "errors_total": 0,
   "output_errors": [],
+  "output_errors_total": 0,
   "expects": [],
   "failure": null,
   "screenshot": null
 }
 ```
+
+The two lists are what the page said, and a page can say a great deal: long messages are truncated and each list is clipped to the earliest 50 entries, with a marker naming what was dropped. `errors_total` and `output_errors_total` are the numbers that actually occurred, so read those for a count and never `len(errors)`.
 
 `failure` is `null` on a pass and one of `error`, `output-error`, `timeout`, `navigation` or `http-status` otherwise. Exit code 1 is a declared outcome, not an error: the check ran and the verdict is on stdout, like `grep` finding nothing. Real errors (a wrong invocation, a missing browser, an internal failure) go to stderr as a one-line JSON envelope, `{"error": {"kind": ..., "message": ..., "hint": ...}}`, when the output format is JSON.
 
