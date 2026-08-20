@@ -484,6 +484,38 @@ def test_an_invalid_expect_selector_is_a_usage_error(tmp_path):
     assert "###not[[[valid" in envelope["error"]["message"]
 
 
+def test_a_selector_chromium_rejects_in_its_own_words_is_a_usage_error_too(tmp_path):
+    """Malformedness is not a wording.
+
+    Chromium reports an unsupported pseudo-class and an invalid XPath as
+    `SyntaxError: Failed to execute ...`, not as a parsing error, so telling a bad
+    selector from a frame that detached mid-navigation by matching the message
+    text let these through. The selector then never matched, the check waited out
+    the whole timeout, and the verdict blamed the app for never rendering.
+    """
+    site = str(page(tmp_path, RENDERED))
+    for selector in ("div:nonsense(1)", "xpath=///"):
+        proc = run_cli(site, "--expect", selector, "--timeout", "20")
+        assert proc.returncode == 2, selector + proc.stdout + proc.stderr
+        envelope = json.loads(proc.stderr.strip().splitlines()[-1])
+        assert envelope["error"]["kind"] == "usage", selector
+        assert selector in envelope["error"]["message"], selector
+
+
+def test_an_invalid_selector_is_answered_before_the_page_is_loaded():
+    """The selector is the caller's mistake, so it is answered without the app.
+
+    Judged inside the poll loop, a bad selector is noticed only once the page is
+    up, and never when the page is down: the navigation failure arrives first and
+    the invocation error is lost behind a verdict about the site.
+    """
+    proc = run_cli("http://127.0.0.1:1/", "--expect", "div:nonsense(1)", "--timeout", "20")
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    envelope = json.loads(proc.stderr.strip().splitlines()[-1])
+    assert envelope["error"]["kind"] == "usage"
+    assert "div:nonsense(1)" in envelope["error"]["message"]
+
+
 def test_a_fixed_port_is_the_port_the_export_is_served_on(tmp_path):
     port = free_port()
     proc = run_cli(str(page(tmp_path, RENDERED)), "--port", str(port), "--timeout", "20")

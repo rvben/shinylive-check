@@ -87,6 +87,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   containing a link to a file elsewhere on the host served that file to the page.
 - Text chosen by the checked page is stripped of control characters and indented
   under the verdict, so it cannot repaint the terminal or forge a headline.
+- A malformed `--expect` selector was reported as the app failing. Chromium
+  rejects a bad selector in more than one wording and only one was recognised, so
+  `--expect "div:nonsense(1)"` ran the full timeout and returned
+  `"failure": "timeout"` with `satisfied: false`: the caller's typo described as a
+  dead app, exit 1 instead of exit 2, after 20 seconds. Selectors are now compiled
+  against a blank page before the site is loaded, which asks whether they parse
+  rather than what the rejection was called, so the answer arrives in under a
+  second and does not depend on the site being reachable.
 - The checked page could choose the size of this tool's stdout, which is what a
   CI job stores and a script has to parse. A 20 MB console error produced a 20 MB
   JSON verdict, 5,000 smaller ones produced 50 MB, and 200 errors written in

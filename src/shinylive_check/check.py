@@ -279,6 +279,8 @@ def run_check(
             page.on("requestfailed", lambda request: failed_loads.add(request.url))
             page.on("response", on_response)
 
+            _validate_selectors(page, expects)
+
             deadline = start + timeout
             try:
                 response = page.goto(
@@ -383,6 +385,29 @@ def _fault(said: list[_Said], failed_loads: set[str], scan: _Scan, *, strict: bo
     return None
 
 
+def _validate_selectors(page: Page, expects: tuple[str, ...]) -> None:
+    """Reject a malformed --expect selector on the blank page, before anything loads.
+
+    Inside the poll loop a bad selector cannot be told from a frame that detached
+    mid-navigation: both arrive as a PlaywrightError, and matching on the message
+    text misses every rejection Chromium words differently (an invalid XPath and
+    an unsupported pseudo-class both come back as `SyntaxError: Failed to execute
+    ...`). Such a selector then simply never matched, so the check waited out the
+    full timeout and reported that the app had not rendered.
+
+    Asking once, here, replaces the text match with a question that has no other
+    answer. The page is still about:blank, so nothing can be transient and no
+    frame can detach: an error is the selector. Being before navigation also
+    means the caller's mistake is reported even when the site is unreachable,
+    where the navigation failure would otherwise arrive first and bury it.
+    """
+    for selector in expects:
+        try:
+            page.locator(selector).first.is_visible()
+        except PlaywrightError as err:
+            raise SelectorError(f"invalid --expect selector: {selector}") from err
+
+
 def _satisfied(scan: _Scan, expect_state: dict[str, bool], expects: tuple[str, ...]) -> bool:
     """Has the app met the pass condition?
 
@@ -425,6 +450,9 @@ def _scan_expects(page: Page, expect_state: dict[str, bool]) -> None:
     spinner and then failed, because each had been true at some point. The verdict
     reports the last scan for the same reason, so a selector listed as satisfied is
     one that was satisfied when the check ended.
+
+    Every selector reaching here parses, having been checked before the page was
+    loaded, so an error is a frame that went away and nothing else.
     """
     for selector in expect_state:
         visible = False
@@ -433,9 +461,7 @@ def _scan_expects(page: Page, expect_state: dict[str, bool]) -> None:
                 if frame.locator(selector).first.is_visible():
                     visible = True
                     break
-            except PlaywrightError as err:
-                if "selector" in str(err) and "parsing" in str(err):
-                    raise SelectorError(f"invalid --expect selector: {selector}") from err
+            except PlaywrightError:
                 continue  # the frame detached or is still navigating
         expect_state[selector] = visible
 
