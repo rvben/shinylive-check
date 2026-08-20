@@ -22,9 +22,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   occurred, which exceed the list lengths once a list is clipped. The text
   headline reports these, so it cannot understate a failure with a number that
   looks real.
+- `shiny_detected` in the JSON verdict: whether the Shiny runtime was observed on
+  the page. A timeout that did not see it says so in the text form, so a check
+  whose selectors all matched does not read as a bug in the tool.
 
 ### Fixed
 
+- `--expect` certified a genuinely dead app. An export serves its HTML shell
+  before pyodide boots, so a selector naming anything in that shell was satisfied
+  by a page the runtime never reached: against an app that raises at import,
+  `--expect body` returned ok in 1.4 s, two seconds before the traceback a bare
+  check catches. Passing now requires the Shiny runtime to be detected as well,
+  which nothing in the static shell can fake, so reaching for `--expect` to be
+  more specific no longer buys a weaker check.
+- An output that rendered and then vanished inside the settle window was reported
+  as a pass. The window re-scanned the page and then kept the larger of the two
+  output counts, so the scan that saw the render decided the verdict and the scan
+  that did not was discarded. The condition is now re-derived from the second
+  scan, and a page that no longer meets it goes back to waiting.
+- `--expect` selectors were satisfied one at a time and stayed satisfied, so
+  `--expect "#loading" --expect "#chart"` passed on a page that showed a spinner
+  and then failed. They must now be visible at the same moment, and the verdict
+  reports the state at the end of the check rather than a high-water mark.
 - A Shiny output that entered an error state during the 500 ms settle window was
   reported as a pass. Console errors arrive as events and were re-read, but an
   output failing inside the window is DOM state and was only visible to another

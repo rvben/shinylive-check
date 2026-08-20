@@ -101,8 +101,9 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="SELECTOR",
-        help="CSS selector that must become visible; repeatable. When given, replaces "
-        "the default at-least-one-rendered-output condition",
+        help="CSS selector that must be visible; repeatable. When given, replaces the "
+        "default at-least-one-rendered-output condition; the Shiny runtime must be "
+        "detected either way",
     )
     parser.add_argument(
         "--screenshot",
@@ -339,6 +340,10 @@ def render_text(result: CheckResult) -> str:
     }
     headline = headlines.get(result.failure or "", "check failed")
     lines = [f"FAIL ({result.failure}): {headline} at {result.url}"]
+    if result.failure == "timeout" and not result.shiny_detected:
+        # Without this, a timeout on a page whose every selector matched reads as a
+        # bug in the tool, and the user retunes the selector that already worked.
+        lines.append("  no Shiny runtime detected: window.Shiny absent and nothing bound")
     for error in result.errors:
         lines += _detail(error)
     for text in result.output_errors:

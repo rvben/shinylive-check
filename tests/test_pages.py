@@ -152,6 +152,139 @@ def test_an_unhandled_promise_rejection_fails_the_check(tmp_path):
         assert verdict["outputs"] == 1, name
 
 
+def test_a_static_shell_with_no_shiny_runtime_never_passes(tmp_path):
+    """`--expect` must not certify a page the Shiny runtime never touched.
+
+    A shinylive export serves its shell before pyodide boots, and every element in
+    that shell matches a selector exactly as well as a rendered app does. So an
+    `--expect` naming a shell element is satisfied by a genuinely dead app:
+    measured against the boot_error fixture, `--expect body` returned ok in 1.4s,
+    two seconds before the traceback a bare check catches. Satisfying the
+    condition needs positive evidence that the runtime is alive, not evidence that
+    HTML exists.
+    """
+    site = page(tmp_path, '<div id="ready">shell</div>', name="shell-only")
+    proc = run_cli(str(site), "--expect", "#ready", "--timeout", "5", "-o", "json")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    verdict = json.loads(proc.stdout)
+    assert verdict["failure"] == "timeout"
+    assert verdict["shiny_detected"] is False
+    # The selector really was satisfied: the check failed on the runtime, and the
+    # verdict has to say which, or the user retunes the selector that already works.
+    assert verdict["expects"] == [{"selector": "#ready", "satisfied": True}]
+
+
+def test_a_bound_element_is_evidence_the_runtime_ran(tmp_path):
+    """The first control for the gate above: same selector, plus a bound element.
+
+    Shiny adds `shiny-bound-*` classes from JavaScript, so their presence in the
+    DOM is the runtime having run, which is what the gate is really asking about.
+    """
+    site = page(tmp_path, RENDERED + '<div id="ready">shell</div>', name="shell-bound")
+    proc = run_cli(str(site), "--expect", "#ready", "--timeout", "20", "-o", "json")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert json.loads(proc.stdout)["shiny_detected"] is True
+
+
+def test_the_shiny_runtime_alone_is_evidence_enough(tmp_path):
+    """The second control: a live app that has not bound an output yet.
+
+    `--expect` exists so a caller can name their own readiness signal, which is
+    often not an output element. A booted runtime with nothing bound must still be
+    able to satisfy it, or the gate would quietly narrow the flag to outputs.
+    """
+    site = page(
+        tmp_path,
+        '<div id="ready">up</div><script>window.Shiny = {};</script>',
+        name="runtime-only",
+    )
+    proc = run_cli(str(site), "--expect", "#ready", "--timeout", "20", "-o", "json")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    verdict = json.loads(proc.stdout)
+    assert verdict["shiny_detected"] is True
+    assert verdict["outputs"] == 0
+
+
+def test_a_render_that_vanishes_during_the_settle_window_is_not_a_pass(tmp_path):
+    """The settle window has to be able to withdraw a pass, not only add a failure.
+
+    It re-scanned the page and then took the larger of the two output counts, so a
+    render that appeared and went away again still counted: the one scan that saw
+    it decided the verdict and the scan that did not was discarded. That is the
+    opposite of what a settle window is for. An app whose output flickers and
+    disappears is exactly the flaky boot this tool exists to catch.
+    """
+    site = page(
+        tmp_path,
+        RENDERED + '\n<script>setTimeout(() => { document.getElementById("one").innerHTML = ""; },'
+        " 100);</script>",
+        name="vanishing",
+    )
+    proc = run_cli(str(site), "--timeout", "5", "-o", "json")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    verdict = json.loads(proc.stdout)
+    assert verdict["failure"] == "timeout"
+    assert verdict["outputs"] == 0
+    # The element is still bound, so this is not the runtime gate firing: the
+    # output really was there and really went away.
+    assert verdict["shiny_detected"] is True
+
+
+def test_expect_selectors_must_be_satisfied_at_the_same_moment(tmp_path):
+    """Two selectors that are never visible together do not add up to a pass.
+
+    Satisfaction used to be sticky: once a selector had been seen it stayed seen,
+    so `--expect "#loading" --expect "#chart"` was satisfied by a page that showed
+    a spinner and then failed. Naming several selectors is a caller asking for a
+    state the app reaches, and a state is a single moment.
+    """
+    site = page(
+        tmp_path,
+        RENDERED
+        + """
+<div id="a">a</div>
+<script>
+setTimeout(() => { document.getElementById("a").style.display = "none"; }, 1000);
+setTimeout(() => {
+  const b = document.createElement("div");
+  b.id = "b";
+  b.textContent = "b";
+  document.body.appendChild(b);
+}, 2500);
+</script>""",
+        name="never-together",
+    )
+    proc = run_cli(str(site), "--expect", "#a", "--expect", "#b", "--timeout", "6", "-o", "json")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    verdict = json.loads(proc.stdout)
+    assert verdict["failure"] == "timeout"
+    # #a is the one that was seen and then withdrawn: the verdict must report the
+    # state now, not the high-water mark.
+    assert [e["selector"] for e in verdict["expects"] if not e["satisfied"]] == ["#a"]
+
+
+def test_expect_selectors_visible_together_pass(tmp_path):
+    """The control: simultaneity is the requirement, not arriving at the same time."""
+    site = page(
+        tmp_path,
+        RENDERED
+        + """
+<div id="a">a</div>
+<script>
+setTimeout(() => {
+  const b = document.createElement("div");
+  b.id = "b";
+  b.textContent = "b";
+  document.body.appendChild(b);
+}, 700);
+</script>""",
+        name="together",
+    )
+    proc = run_cli(str(site), "--expect", "#a", "--expect", "#b", "--timeout", "20", "-o", "json")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert all(e["satisfied"] for e in json.loads(proc.stdout)["expects"])
+
+
 def test_every_expect_selector_must_be_satisfied(tmp_path):
     # One of the two is present. All must be, or the condition is not met.
     proc = run_cli(
@@ -217,4 +350,4 @@ def test_the_frame_scan_script_is_valid_and_returns_its_documented_shape(tmp_pat
             scan = tab.evaluate(_FRAME_SCAN)
         finally:
             browser.close()
-    assert scan == {"bound": 2, "rendered": 1, "errors": ["bad"]}
+    assert scan == {"bound": 2, "inputs": 0, "rendered": 1, "errors": ["bad"], "runtime": False}

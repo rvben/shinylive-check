@@ -26,9 +26,16 @@ class SelectorError(ValueError):
     """An --expect selector is not valid CSS."""
 
 
-# The app runs in an iframe, so every frame is scanned; selectors evaluated only on
-# the main frame silently match nothing. Outputs carrying shiny-output-error are the
-# app saying a render failed; outputs with content are the render succeeding.
+# An export may put the app in an iframe, so every frame is scanned; selectors
+# evaluated only on the main frame would silently match nothing there. Outputs
+# carrying shiny-output-error are the app saying a render failed; outputs with
+# content are the render succeeding.
+#
+# `runtime` and the two element counts are the evidence that the Shiny runtime is
+# actually alive. Shiny defines window.Shiny and adds every shiny-bound-* class from
+# JavaScript, so none of the three can appear in the static shell an export serves
+# before pyodide boots: they separate a booting app from a dead one, which nothing
+# in the shell's own HTML can do.
 _FRAME_SCAN = """
 () => {
   const outs = Array.from(document.querySelectorAll(".shiny-bound-output"));
@@ -40,7 +47,13 @@ _FRAME_SCAN = """
     const text = (el.textContent || "").trim();
     if (text) errors.push(text);
   }
-  return { bound: outs.length, rendered, errors };
+  return {
+    bound: outs.length,
+    inputs: document.querySelectorAll(".shiny-bound-input").length,
+    rendered,
+    errors,
+    runtime: typeof window.Shiny !== "undefined",
+  };
 }
 """
 
@@ -138,11 +151,23 @@ class ExpectResult:
 
 
 @dataclass
+class _Scan:
+    """What one sweep of every frame saw."""
+
+    outputs: int
+    output_errors: list[str]
+    # window.Shiny, a bound input or a bound output: any one of them is the runtime
+    # having executed, and none of them can come from the static shell.
+    shiny_detected: bool
+
+
+@dataclass
 class CheckResult:
     ok: bool
     url: str
     seconds: float
     outputs: int
+    shiny_detected: bool
     errors: list[str]
     # The number that OCCURRED, which is not len(errors) once the list is clipped.
     errors_total: int
@@ -164,10 +189,11 @@ def run_check(
     """Load ``url``, wait for the app to render, and return the verdict.
 
     Passing means: the page loaded, no console or page error occurred, no Shiny
-    output is in an error state, and either every ``expects`` selector became
-    visible (when given) or at least one Shiny output rendered non-empty content
-    (the default). ``screenshot`` is captured only on failure. ``progress`` is
-    called with the elapsed seconds on every poll, for callers reporting a wait.
+    output is in an error state, the Shiny runtime was detected on the page, and
+    either every ``expects`` selector was visible (when given) or at least one
+    Shiny output rendered non-empty content (the default). ``screenshot`` is
+    captured only on failure. ``progress`` is called with the elapsed seconds on
+    every poll, for callers reporting a wait.
     """
     start = time.monotonic()
     errors: list[str] = []
@@ -176,6 +202,7 @@ def run_check(
         *,
         ok: bool,
         outputs: int = 0,
+        shiny_detected: bool = False,
         output_errors: list[str] | None = None,
         expect_state: dict[str, bool] | None = None,
         failure: str | None = None,
@@ -188,6 +215,7 @@ def run_check(
             url=url,
             seconds=round(time.monotonic() - start, 1),
             outputs=outputs,
+            shiny_detected=shiny_detected,
             errors=_bounded(errors),
             errors_total=len(errors),
             output_errors=_bounded(page_errors),
@@ -226,31 +254,34 @@ def run_check(
 
             deadline = start + timeout
             expect_state = dict.fromkeys(expects, False)
-            outputs = 0
-            output_errors: list[str] = []
+            scan = _Scan(outputs=0, output_errors=[], shiny_detected=False)
 
             while True:
-                outputs, output_errors = _scan_frames(page)
+                scan = _scan_frames(page)
                 _scan_expects(page, expect_state)
-                rendered = all(expect_state.values()) if expects else outputs >= 1
 
                 if errors:
                     failure = "error"
-                elif output_errors:
+                elif scan.output_errors:
                     failure = "output-error"
-                elif rendered:
+                elif _satisfied(scan, expect_state, expects):
                     # Let the page settle briefly: a failure right after the first
                     # render still fails the check instead of racing it. Console
                     # errors arrive as events, but an output that fails inside the
                     # window is only visible to another scan, so the page is
                     # re-scanned rather than just re-read.
                     page.wait_for_timeout(_SETTLE_MILLIS)
-                    settled, output_errors = _scan_frames(page)
-                    outputs = max(outputs, settled)
+                    scan = _scan_frames(page)
+                    _scan_expects(page, expect_state)
                     if errors:
                         failure = "error"
-                    elif output_errors:
+                    elif scan.output_errors:
                         failure = "output-error"
+                    elif not _satisfied(scan, expect_state, expects):
+                        # It held, then stopped holding. That is not a pass, and it
+                        # is not yet a failure either: the app may simply be
+                        # mid-rerender, so the condition has to be met again.
+                        continue
                     else:
                         failure = None
                 elif time.monotonic() > deadline:
@@ -264,8 +295,9 @@ def run_check(
                 ok = failure is None
                 return result(
                     ok=ok,
-                    outputs=outputs,
-                    output_errors=output_errors,
+                    outputs=scan.outputs,
+                    shiny_detected=scan.shiny_detected,
+                    output_errors=scan.output_errors,
                     expect_state=expect_state,
                     failure=failure,
                     shot=None if ok else _shoot(page, screenshot),
@@ -274,10 +306,28 @@ def run_check(
             browser.close()
 
 
-def _scan_frames(page: Page) -> tuple[int, list[str]]:
-    """Rendered output count and output error texts, summed over every frame."""
+def _satisfied(scan: _Scan, expect_state: dict[str, bool], expects: tuple[str, ...]) -> bool:
+    """Has the app met the pass condition?
+
+    Every pass is gated on ``shiny_detected`` first, whatever the condition. An
+    export serves its shell before pyodide boots, so a selector naming anything in
+    that shell is satisfied by a page the runtime never reached: without this gate,
+    ``--expect`` certified a fixture that raises at import. The default condition
+    already implies it, since a rendered output is itself Shiny having run; making
+    it explicit is what stops the two conditions from meaning different things.
+    """
+    if not scan.shiny_detected:
+        return False
+    if expects:
+        return all(expect_state.values())
+    return scan.outputs >= 1
+
+
+def _scan_frames(page: Page) -> _Scan:
+    """One sweep of every frame, summed."""
     outputs = 0
     output_errors: list[str] = []
+    shiny_detected = False
     for frame in page.frames:
         try:
             scan = frame.evaluate(_FRAME_SCAN)
@@ -285,23 +335,32 @@ def _scan_frames(page: Page) -> tuple[int, list[str]]:
             continue  # the frame detached or is still navigating
         outputs += scan["rendered"]
         output_errors.extend(scan["errors"])
-    return outputs, output_errors
+        shiny_detected = shiny_detected or bool(scan["runtime"] or scan["bound"] or scan["inputs"])
+    return _Scan(outputs=outputs, output_errors=output_errors, shiny_detected=shiny_detected)
 
 
 def _scan_expects(page: Page, expect_state: dict[str, bool]) -> None:
-    """Mark selectors that became visible in any frame; visibility is sticky."""
-    for selector, satisfied in expect_state.items():
-        if satisfied:
-            continue
+    """Record which selectors are visible in some frame, as of now.
+
+    Deliberately not sticky. Naming several selectors is a caller describing a
+    state the app reaches, and a state is one moment: sticky satisfaction let
+    ``--expect "#loading" --expect "#chart"`` be satisfied by a page that showed a
+    spinner and then failed, because each had been true at some point. The verdict
+    reports the last scan for the same reason, so a selector listed as satisfied is
+    one that was satisfied when the check ended.
+    """
+    for selector in expect_state:
+        visible = False
         for frame in page.frames:
             try:
                 if frame.locator(selector).first.is_visible():
-                    expect_state[selector] = True
+                    visible = True
                     break
             except PlaywrightError as err:
                 if "selector" in str(err) and "parsing" in str(err):
                     raise SelectorError(f"invalid --expect selector: {selector}") from err
-                continue
+                continue  # the frame detached or is still navigating
+        expect_state[selector] = visible
 
 
 def _shoot(page: Page, path: str | None) -> str | None:

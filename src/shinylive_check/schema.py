@@ -19,6 +19,15 @@ _VERDICT_FIELDS = [
         "description": "Shiny outputs that rendered non-empty content",
     },
     {
+        "name": "shiny_detected",
+        "type": "boolean",
+        "description": (
+            "True when the Shiny runtime was observed on the page: window.Shiny "
+            "defined, or an element Shiny bound. Every pass requires it, so a "
+            "static shell cannot satisfy --expect"
+        ),
+    },
+    {
         "name": "errors",
         "type": "array",
         "items": {"type": "string"},

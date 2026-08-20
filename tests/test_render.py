@@ -38,6 +38,9 @@ def verdict(**overrides: Any) -> CheckResult:
     # unclipped one unless a test says otherwise.
     fields.setdefault("errors_total", len(fields["errors"]))
     fields.setdefault("output_errors_total", len(fields["output_errors"]))
+    # A rendered output is itself proof the runtime ran, so the default is derived
+    # rather than fixed: a verdict built here is never internally contradictory.
+    fields.setdefault("shiny_detected", fields["outputs"] > 0)
     return CheckResult(**fields)
 
 
@@ -74,6 +77,33 @@ def test_a_timeout_reports_the_time_actually_waited():
     assert text.splitlines()[0] == (
         "FAIL (timeout): app did not render (waited 3.6s) at http://127.0.0.1:8000/"
     )
+
+
+def test_a_timeout_with_no_runtime_names_the_runtime_as_the_reason():
+    """A timeout whose selectors all matched is otherwise unreadable.
+
+    The gate can fail a page every `--expect` selector was satisfied on, and
+    "app did not render" alongside a list of satisfied selectors reads as a bug in
+    the tool. The verdict has to say which half of the condition was missing, or
+    the user goes off retuning the selector that already worked.
+    """
+    text = render_text(
+        verdict(
+            failure="timeout",
+            shiny_detected=False,
+            expects=[ExpectResult("#ready", True)],
+            seconds=5.0,
+        )
+    )
+    assert "no Shiny runtime detected" in text
+
+
+def test_a_timeout_that_did_see_the_runtime_does_not_blame_it():
+    """The control: the line above must be evidence, not decoration."""
+    text = render_text(
+        verdict(failure="timeout", shiny_detected=True, expects=[ExpectResult("#late", False)])
+    )
+    assert "no Shiny runtime detected" not in text
 
 
 def test_a_navigation_failure_says_the_page_would_not_load():

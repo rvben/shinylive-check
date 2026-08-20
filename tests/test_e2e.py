@@ -60,6 +60,9 @@ def test_green_export_over_http(ok_site):
 def test_expect_selector_satisfied(ok_site):
     proc = run_cli(str(ok_site), "--expect", "#txt")
     assert proc.returncode == 0, proc.stdout + proc.stderr
+    # The control for test_expect_cannot_certify_a_dead_export: a real export must
+    # still be recognised as a live runtime, or that gate is a blanket refusal.
+    assert json.loads(proc.stdout)["shiny_detected"] is True
 
 
 def test_expect_selector_unsatisfied_fails(ok_site):
@@ -83,6 +86,21 @@ def test_boot_error_fails_with_the_message_and_a_screenshot(boot_error_site, tmp
     assert "boot_error fixture" in joined
     assert shot.exists() and shot.stat().st_size > 0
     assert verdict["screenshot"] == str(shot)
+
+
+def test_expect_cannot_certify_a_dead_export(boot_error_site):
+    """The configuration the suite never exercised, against the app it knows is dead.
+
+    Every other boot_error assertion runs without `--expect`, which is precisely
+    the one configuration where the check held. With `--expect` naming anything the
+    static shell already provides, the same dead export was certified ok, and the
+    caller who reached for the flag to be MORE specific got a weaker check.
+    """
+    proc = run_cli(str(boot_error_site), "--expect", "body", "--timeout", "90", "-o", "json")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    verdict = json.loads(proc.stdout)
+    assert verdict["ok"] is False
+    assert "boot_error fixture" in " ".join(verdict["errors"] + verdict["output_errors"])
 
 
 def test_missing_package_fails_with_the_package_name(missing_package_site):

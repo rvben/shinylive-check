@@ -69,10 +69,12 @@ shinylive-check site
 shinylive-check https://example.github.io/my-app/
 ```
 
-Passing means: the page loaded, no console or page error occurred, no Shiny output is in an error state, and at least one Shiny output rendered non-empty content. After the first successful render the page gets half a second to settle, so an error thrown right after the render still fails the check instead of racing it.
+Passing means: the page loaded, no console or page error occurred, no Shiny output is in an error state, the Shiny runtime was detected on the page, and at least one Shiny output rendered non-empty content. After the first successful render the page gets half a second to settle, so an error thrown right after the render still fails the check instead of racing it.
 
-- `--timeout SECONDS` (default 180): how long the app gets to render. A cold pyodide boot loads tens of megabytes of wasm, so the default is generous; a warm CI cache usually finishes in seconds.
-- `--expect SELECTOR` (repeatable): CSS selectors that must become visible, replacing the default at-least-one-rendered-output condition. For apps whose UI is inputs only, or when "booted" means something specific: `--expect "#sales" --expect ".value-box"`.
+The runtime check is what stops a static shell from passing. An export serves its HTML before pyodide boots, so any selector naming something in that shell matches just as well on a dead app as on a live one; `window.Shiny` and the `shiny-bound-*` classes are added by JavaScript and cannot. `shiny_detected` in the verdict reports it.
+
+- `--timeout SECONDS` (default 180): how long the app gets to render, and the budget for loading the page. A cold pyodide boot loads tens of megabytes of wasm, so the default is generous; a warm CI cache usually finishes in seconds.
+- `--expect SELECTOR` (repeatable): CSS selectors that must be visible, replacing the default at-least-one-rendered-output condition. For apps whose UI is inputs only, or when "booted" means something specific: `--expect "#sales" --expect ".value-box"`. The runtime check still applies, and the selectors must be satisfied at the same moment, not one at a time.
 - `--screenshot PATH`: write a full-page screenshot when the check fails, for the CI artifact that shows what the visitor would have seen.
 - `--port PORT`: serve a directory target on a fixed port instead of an ephemeral one, for exports that reference themselves by absolute URL.
 - `-o, --output auto|text|json` (default `auto`): the verdict format on stdout. `auto` emits JSON when stdout is not a TTY, the human-readable form otherwise.
