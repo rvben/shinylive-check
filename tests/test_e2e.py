@@ -113,12 +113,35 @@ def test_missing_package_fails_with_the_package_name(missing_package_site):
     assert "nonexistent-package" in joined
 
 
-def test_a_boot_slower_than_the_timeout_fails_as_timeout(ok_site):
-    proc = run_cli(str(ok_site), "--timeout", "1", "-o", "json")
+def test_a_boot_cut_short_by_the_timeout_is_not_a_broken_app(ok_site):
+    """Running out of budget is the tool's answer, never a verdict about the app.
+
+    A real export cut off mid-boot is the case only this fixture can produce:
+    pyodide is still fetching a runtime, and the app it will eventually run is
+    known-good. Whatever comes back must therefore be about the budget running
+    out, never about the app, which rules out `error`, `resource-error` and
+    `http-status` alike.
+
+    Which wait verdict it is - `navigation` for a page that never finished
+    loading, `timeout` for one that loaded and never rendered - is the machine's
+    business rather than this test's, because the budget covers launching the
+    browser too. Pinning one of them meant guessing a number that lands between
+    the phases, and there is no such number: `--timeout 1` flipped run to run on
+    this laptop, and `--timeout 3` still failed under the floor venv, where a
+    loaded machine spent the whole budget before the page was up. Both classes
+    are already pinned where they can be asked deterministically: `timeout`
+    against this same export with a generous budget and an `--expect` that is
+    never satisfied, and `navigation` against a host that never answers.
+    """
+    proc = run_cli(str(ok_site), "--timeout", "3", "-o", "json")
     assert proc.returncode == 1, proc.stdout + proc.stderr
     verdict = json.loads(proc.stdout)
     assert verdict["ok"] is False
-    assert verdict["failure"] == "timeout"
+    assert verdict["failure"] in {"timeout", "navigation"}, verdict
+    # And the budget was honoured: this is a check that stopped, not one that ran
+    # long and happened to be judged. Generous, since the poll granularity and a
+    # browser that has to be closed both land on top of the budget.
+    assert verdict["seconds"] < 10, verdict["seconds"]
 
 
 def test_missing_chromium_is_an_environment_error(ok_site, tmp_path):
