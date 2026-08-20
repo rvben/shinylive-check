@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import io
 import json
 import os
 import sys
@@ -308,9 +309,28 @@ def _leave_now(code: int) -> NoReturn:
     os._exit(code)
 
 
+def _tolerate_unencodable_output() -> None:
+    """Give stdout the tolerance Python already gives stderr.
+
+    The page chooses the alphabet of every message this tool reports, and the
+    environment chooses what stdout can encode: a Windows shell redirecting to a
+    file uses its code page, and `PYTHONIOENCODING` is set by hand in plenty of
+    CI jobs. Python opens stdout `strict` and stderr `backslashreplace`, so a
+    verdict about a page speaking emoji raised UnicodeEncodeError and was
+    reported as a bug in this tool, on the exit code reserved for one - in place
+    of the failing app it had correctly found.
+
+    Escaping rather than dropping, because a message with a hole in it is one
+    nobody can search for, and the escape names the character exactly.
+    """
+    if isinstance(sys.stdout, io.TextIOWrapper):
+        sys.stdout.reconfigure(errors="backslashreplace")
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the CLI, and let nothing out of here except a documented exit code."""
     args_list = sys.argv[1:] if argv is None else argv
+    _tolerate_unencodable_output()
     try:
         code = _dispatch(args_list)
         # stdout is block-buffered when it is not a terminal, so a verdict or a

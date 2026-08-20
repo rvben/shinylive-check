@@ -56,6 +56,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reports for a filter stopped by SIGPIPE, and say nothing at all, since whoever
   would have read it has gone. The code and a `broken_pipe` error kind are
   declared in the schema, in the README and in `--help`.
+- A verdict about a page whose text stdout cannot encode was reported as a bug
+  in the tool. Python opens stdout strict and stderr with escaping, so on a
+  terminal or a redirect that is not UTF-8, an app erroring in emoji or in an
+  accented language raised UnicodeEncodeError inside the check: exit 5 and an
+  invitation to file a bug, in place of the exit 1 and the failing app it had
+  correctly found. Characters stdout cannot spell are now escaped the way stderr
+  already escapes them, so the diagnosis arrives whole and the verdict is the
+  one the check reached.
 - The `schema` command declared `usage` as the only way it can fail, while the
   contract it prints listed four more. It now declares every kind but
   `unavailable`, which needs a browser this command never launches.

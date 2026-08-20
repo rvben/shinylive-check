@@ -181,6 +181,36 @@ def test_a_truncated_error_list_still_reports_the_true_count_in_text(tmp_path):
     assert proc.stdout.splitlines()[0].startswith("FAIL (error): 2000 console/page error(s)")
 
 
+def test_a_verdict_survives_a_stdout_that_cannot_spell_the_page(tmp_path):
+    """The page chooses its alphabet; the environment chooses what stdout encodes.
+
+    Those two disagree in ordinary places: a Windows shell redirecting to a file
+    uses the code page, and `PYTHONIOENCODING` is set by hand in plenty of CI
+    jobs. Python opens stdout with `strict` while stderr gets `backslashreplace`,
+    so printing a verdict about a page speaking emoji raised UnicodeEncodeError,
+    which the catch-all then reported as exit 5 and a bug in this tool. The app
+    was genuinely broken, and the one thing the check exists to say - that it is
+    broken, on exit code 1 - was replaced by a bug report about the terminal.
+
+    Escaping beats dropping: a message with a hole in it cannot be searched for.
+    """
+    site = tmp_path / "unencodable"
+    site.mkdir()
+    (site / "index.html").write_text(
+        '<html><body><script>console.error("boom \\u{1F4A5} caf\\u00e9");</script></body></html>'
+    )
+    proc = run_cli(str(site), "--timeout", "20", "-o", "text", env={"PYTHONIOENCODING": "ascii"})
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert proc.stdout.startswith("FAIL (error):")
+    assert "Traceback" not in proc.stderr, proc.stderr
+    assert "bug in shinylive-check" not in proc.stderr, proc.stderr
+    # The diagnosis arrives whole: the part ascii can spell as itself, and the
+    # part it cannot as the escape that names the character.
+    assert "boom" in proc.stdout
+    assert "\\U0001f4a5" in proc.stdout
+    assert "\\xe9" in proc.stdout
+
+
 def test_the_error_text_is_still_reported(tmp_path):
     """Sanitizing must not swallow the diagnosis: the message still gets through."""
     proc = run_cli(str(hostile_site(tmp_path)), "--timeout", "15", "-o", "json")
