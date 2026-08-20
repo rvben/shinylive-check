@@ -188,7 +188,7 @@ SCHEMA = {
                 },
             ],
             "output_fields": _VERDICT_FIELDS,
-            "errors": ["usage", "unavailable", "internal", "interrupted"],
+            "errors": ["usage", "unavailable", "internal", "interrupted", "broken_pipe"],
             "outcomes": ["check_failed"],
             # Self-contained probe for conformance tooling: a refused loopback
             # connection produces a normal failure verdict (the check_failed
@@ -218,7 +218,11 @@ SCHEMA = {
                 {"name": "errors", "type": "array", "items": {"type": "object"}},
                 {"name": "outcomes", "type": "array", "items": {"type": "object"}},
             ],
-            "errors": ["usage"],
+            # Every kind but `unavailable`, which needs a browser this command
+            # never launches. The other three are the process's business rather
+            # than the command's: a bug, an interrupt, and a reader walking away
+            # can happen to anything that prints.
+            "errors": ["usage", "internal", "interrupted", "broken_pipe"],
         },
     ],
     "errors": [
@@ -259,6 +263,17 @@ SCHEMA = {
                 "is the one a shell reports for the same interrupt, and it is "
                 "deliberately not 1: nothing was judged, so a wrapper must not read "
                 "an abandoned check as an app that failed."
+            ),
+        },
+        {
+            "kind": "broken_pipe",
+            "exit_code": 141,
+            "retryable": False,
+            "description": (
+                "Whatever was reading stdout closed it, as `| head` does. The code is "
+                "the one a shell reports for a filter killed by SIGPIPE. This is the "
+                "one kind that writes no envelope: the reader has gone, so there is "
+                "nobody to write it to, and stderr stays empty."
             ),
         },
     ],

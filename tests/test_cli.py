@@ -2,6 +2,10 @@
 
 import argparse
 import json
+import os
+import re
+import subprocess
+import sys
 from dataclasses import fields
 
 from conftest import run_cli
@@ -55,6 +59,51 @@ def test_version_prints_a_version():
     assert proc.stdout.strip().count(".") == 2
 
 
+def _run_unread(*args: str) -> tuple[int, str]:
+    """Run the CLI writing to a pipe nothing will ever read from.
+
+    `| head -1` is this situation with a race in it: whether the first write fits
+    in the pipe buffer before the reader leaves decides whether the tool notices
+    at all, so a small output usually gets away with it and a 200 KB verdict does
+    not. Closing the read end up front removes the race and asks the question
+    directly, of whichever write comes first.
+    """
+    read, write = os.pipe()
+    os.close(read)
+    try:
+        with subprocess.Popen(
+            [sys.executable, "-m", "shinylive_check", *args],
+            stdout=write,
+            stderr=subprocess.PIPE,
+            text=True,
+        ) as proc:
+            assert proc.stderr is not None
+            stderr = proc.stderr.read()
+    finally:
+        os.close(write)
+    return proc.returncode, stderr
+
+
+def test_a_reader_that_stops_early_is_not_reported_as_a_bug_in_the_tool():
+    """`| head` is a thing people do, not a defect to report.
+
+    Every stdout writer is asked, because they are different code paths: argparse
+    writes the help, and the tool writes the contract and the verdict. A failure
+    here does not stay quiet - it lands as `internal`, which prints a traceback
+    and tells the user to file a bug against this tool for having used `head`.
+    """
+    for args in (["--help"], ["schema"], ["--version"]):
+        code, stderr = _run_unread(*args)
+        # 128 + SIGPIPE, which is what a shell reports for a pipeline stopped this
+        # way, and what every other filter in that pipeline would have returned.
+        assert code == 141, f"{args} exited {code}\n{stderr}"
+        assert "Traceback" not in stderr, f"{args}\n{stderr}"
+        assert "bug in shinylive-check" not in stderr, f"{args}\n{stderr}"
+        # Nothing is said at all: the one who would have read it has gone, and an
+        # envelope on every `| head` is noise rather than news.
+        assert stderr == "", f"{args}\n{stderr}"
+
+
 def test_schema_is_a_valid_clispec_contract():
     proc = run_cli("schema")
     assert proc.returncode == 0
@@ -75,10 +124,28 @@ def test_schema_is_a_valid_clispec_contract():
     kinds = {error["kind"]: error["exit_code"] for error in schema["errors"]}
     # Every way the tool can fail without a verdict is declared, including the
     # catch-all: an undeclared crash is indistinguishable from a judged failure.
-    assert kinds == {"usage": 2, "unavailable": 4, "internal": 5, "interrupted": 130}
+    assert kinds == {
+        "usage": 2,
+        "unavailable": 4,
+        "internal": 5,
+        "interrupted": 130,
+        "broken_pipe": 141,
+    }
     assert set(check["errors"]) == set(kinds)
+    # The schema command declares the same list minus the one kind that genuinely
+    # cannot reach it: printing a contract needs no browser. The rest are not
+    # about what a command does - a bug, an interrupt and a reader walking away
+    # are the process's business, and any command can meet them.
+    contract = next(command for command in schema["commands"] if command["name"] == "schema")
+    assert set(contract["errors"]) == set(kinds) - {"unavailable"}
     outcomes = {outcome["name"]: outcome["code"] for outcome in schema["outcomes"]}
     assert outcomes == {"check_failed": 1}
+    # Both are identifiers in the dialect rather than prose, and clispec rejects
+    # the whole contract over one that is not - which is worth a single point out
+    # of twenty-four, so an invalid schema still grades Excellent and only this
+    # notices. A hyphen is the easy way to write one, and reads fine.
+    for name in [*kinds, *outcomes]:
+        assert re.fullmatch(r"[a-z][a-z0-9_]*", name), f"{name} is not a clispec identifier"
 
 
 def test_every_verdict_field_is_declared_in_the_schema_and_no_others():
@@ -144,6 +211,63 @@ def test_the_readme_sample_verdict_shows_every_field(readme):
     documented = set(json.loads(sample))
     emitted = {field.name for field in fields(CheckResult)} | {"target"}
     assert documented == emitted
+
+
+def _declared_exit_codes() -> set[int]:
+    """Every code the contract promises.
+
+    0 is the one no contract declares, because success is the absence of an
+    outcome and of an error, so it is named rather than derived.
+    """
+    return (
+        {0}
+        | {outcome["code"] for outcome in SCHEMA["outcomes"]}
+        | {error["exit_code"] for error in SCHEMA["errors"]}
+    )
+
+
+def _tabulated_codes(text: str, heading: str) -> set[int]:
+    """The codes listed under `heading`, in a markdown table or a plain one.
+
+    Both write the code first on its line and stop at the first line without one,
+    which is all the parsing this needs. A heading that moved is an assertion
+    rather than an empty result, since a table nobody found reads as agreement.
+    """
+    _, marker, rest = text.partition(heading)
+    assert marker, f"the exit-code table no longer follows {heading!r}"
+    codes: set[int] = set()
+    for line in rest.splitlines():
+        # A markdown row opens with the pipe that separates its cells; a plain
+        # line may also contain one, and there it is prose about `| head`.
+        cell = line.split("|")[1] if line.lstrip().startswith("|") else line
+        first = cell.split(maxsplit=1)
+        if first and first[0].isdigit():
+            codes.add(int(first[0]))
+        elif codes:
+            break
+    return codes
+
+
+def test_the_readme_lists_every_exit_code_the_contract_declares(readme):
+    """The README's table is where a person reads the exit codes.
+
+    The schema is where a script reads them, and the two drift apart one code at
+    a time: each arrives in its own change, which touches the schema because the
+    tests hold it there, and the table only if someone remembers. A code that is
+    real but undocumented is one nobody handles.
+    """
+    assert _tabulated_codes(readme, "Exit codes:\n") == _declared_exit_codes()
+
+
+def test_the_help_lists_every_exit_code_the_contract_declares():
+    """The same table again, for the reader who runs `--help` instead.
+
+    Two surfaces documenting one contract is two chances to fall behind it, and
+    the one nobody is looking at is the one that does.
+    """
+    proc = run_cli("--help")
+    assert proc.returncode == 0
+    assert _tabulated_codes(proc.stdout, "exit codes:\n") == _declared_exit_codes()
 
 
 def test_check_subcommand_is_an_alias_for_the_bare_target(tmp_path):

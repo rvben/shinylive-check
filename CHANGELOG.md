@@ -45,6 +45,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   terminal as a JSON envelope with the usage block dropped, decided by what the
   directory happened to be called. The search now stops at the marker the way
   argparse does; a request made before it still stands.
+- Piping a verdict into `head` was reported as a bug in the tool. A verdict is
+  far larger than the 64 KB a pipe holds, so the reader leaves mid-transfer and
+  the write itself fails: `shinylive-check site -o json | head` reached the
+  catch-all, which printed a traceback and a JSON envelope asking the user to
+  report a bug in shinylive-check, and exited 5. Output small enough to sit in
+  the pipe buffer failed later and less visibly, at the interpreter's own flush,
+  where `--help` and `schema` exited 120 with a complaint about an exception
+  ignored on flushing stdout. Both paths now exit 141, the number a shell
+  reports for a filter stopped by SIGPIPE, and say nothing at all, since whoever
+  would have read it has gone. The code and a `broken_pipe` error kind are
+  declared in the schema, in the README and in `--help`.
+- The `schema` command declared `usage` as the only way it can fail, while the
+  contract it prints listed four more. It now declares every kind but
+  `unavailable`, which needs a browser this command never launches.
+- The README's exit-code table omitted 130, real since Ctrl-C was fixed. Both
+  tables, the README's and the one in `--help`, are now held to the schema by a
+  test, and the schema's own error kinds are held to the identifier spelling
+  that The CLI Spec requires: a hyphen in one invalidates the whole contract
+  while still scoring Excellent.
 - `--expect` certified a genuinely dead app. An export serves its HTML shell
   before pyodide boots, so a selector naming anything in that shell was satisfied
   by a page the runtime never reached: against an app that raises at import,

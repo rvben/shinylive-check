@@ -74,12 +74,18 @@ check: lock-check lint typecheck test test-browser check-wheel check-floor
 # Validates the `schema` output against The CLI Spec, when clispec is on PATH.
 # Requires clispec in PATH (cargo install clispec); not part of `check` so CI
 # does not need a Rust toolchain. Run before releasing.
+#
+# Every check has to pass, not just enough of them to grade well: a schema that
+# fails validation outright still scores Excellent, so a grade is not a gate. The
+# failing checks are printed with their detail, which says what is wrong.
 schema-check: sync
 	@mkdir -p tmp
 	clispec score .venv/bin/shinylive-check -o json > tmp/clispec.json
 	@python3 -c "import json,sys; d=json.load(open('tmp/clispec.json')); \
-	print(f\"clispec: {d['score']}/{d['max']} {d['grade']}\"); \
-	sys.exit(0 if d['grade'] == 'Excellent' else 1)"
+	failed=[c for p in d['principles'] for c in p['checks'] if not c['passed']]; \
+	print(f\"clispec: {d['score']}/{d['max']} {d['grade']}\", flush=True); \
+	sys.stderr.write(''.join(f\"failed: {c['name']}: {c['detail'] or ''}\n\" for c in failed)); \
+	sys.exit(1 if failed else 0)"
 
 # The version in pyproject.toml, the single source for the package version.
 version:

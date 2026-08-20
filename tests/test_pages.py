@@ -14,6 +14,8 @@ import http.server
 import json
 import os
 import socket
+import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -555,3 +557,40 @@ def test_the_frame_scan_script_is_valid_and_returns_its_documented_shape(tmp_pat
         finally:
             browser.close()
     assert scan == {"bound": 2, "inputs": 0, "rendered": 1, "errors": ["bad"], "runtime": False}
+
+
+def test_a_verdict_too_big_for_the_pipe_does_not_become_a_bug_report(tmp_path):
+    """`shinylive-check site -o json | head`, which is how a person looks at a verdict.
+
+    The other half of this is covered without a browser in test_cli.py, where a
+    pipe closed up front makes the very first write fail. This is the branch only
+    a real check reaches: a verdict far larger than the 64 KB a pipe holds cannot
+    be handed over in one write, so the reader leaves mid-transfer and the failure
+    lands inside the write rather than in the flush after it. That one used to
+    reach the catch-all, which printed a traceback and asked the user to report a
+    bug in this tool, for having used `head`.
+    """
+    noisy = (
+        "<script>for (let i = 0; i < 200; i++) "
+        '{ console.error("E".repeat(4000) + " #" + i); }</script>'
+    )
+    site = page(tmp_path, RENDERED + noisy)
+    with subprocess.Popen(
+        [sys.executable, "-m", "shinylive_check", str(site), "--timeout", "30", "-o", "json"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    ) as tool:
+        assert tool.stdout is not None and tool.stderr is not None
+        with subprocess.Popen(
+            ["head", "-c", "100"], stdin=tool.stdout, stdout=subprocess.DEVNULL
+        ) as reader:
+            # This process holds a copy of the read end too, and while it does the
+            # writer never learns that head has gone.
+            tool.stdout.close()
+            reader.wait()
+        stderr = tool.stderr.read()
+    # 128 + SIGPIPE, the same answer the fast test gets from the other branch.
+    assert tool.returncode == 141, f"exited {tool.returncode}\n{stderr}"
+    assert "Traceback" not in stderr, stderr
+    assert "bug in shinylive-check" not in stderr, stderr

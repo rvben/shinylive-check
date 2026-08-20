@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import sys
@@ -26,6 +27,9 @@ EXIT_INTERNAL = 5
 # What a shell reports for a command stopped by SIGINT, so a wrapper script reads
 # the same number here that it reads from anything else the user interrupted.
 EXIT_INTERRUPTED = 130
+# The same convention for SIGPIPE: what every other filter in the pipeline returns
+# when whoever was reading its output has gone.
+EXIT_BROKEN_PIPE = 141
 
 # A cold pyodide boot is tens of megabytes of wasm and the default timeout is three
 # minutes, so the wait gets a pulse: silence for that long reads as a hung job.
@@ -44,6 +48,7 @@ exit codes:
     4  environment error: Chromium is not installed for playwright
     5  internal error: shinylive-check itself failed
   130  interrupted before a verdict was reached
+  141  stdout was closed by whatever was reading it, as `| head` does
 
 `shinylive-check schema` prints the machine-readable contract; pass ./schema to
 check a directory of that name.
@@ -292,9 +297,14 @@ def _leave_now(code: int) -> NoReturn:
     envelope, taking the last line, which is the line a script parses. There is
     nothing left to do by then: the driver is a child process reading a pipe that
     closes when this one exits, and it takes the browser with it.
+
+    A stream that cannot be flushed is one nobody is reading, which is the reason
+    for some of the calls here; leaving is still the right move, and skipping the
+    interpreter's own flush is what keeps it quiet.
     """
-    sys.stdout.flush()
-    sys.stderr.flush()
+    for stream in (sys.stdout, sys.stderr):
+        with contextlib.suppress(BrokenPipeError):
+            stream.flush()
     os._exit(code)
 
 
@@ -302,7 +312,14 @@ def main(argv: list[str] | None = None) -> int:
     """Run the CLI, and let nothing out of here except a documented exit code."""
     args_list = sys.argv[1:] if argv is None else argv
     try:
-        return _dispatch(args_list)
+        code = _dispatch(args_list)
+        # stdout is block-buffered when it is not a terminal, so a verdict or a
+        # contract small enough to fit the buffer is not actually written until
+        # something flushes it. Doing that here means a reader that has gone is
+        # answered below rather than by the interpreter on its way out, where the
+        # same failure is only reportable as an ignored exception.
+        sys.stdout.flush()
+        return code
     except KeyboardInterrupt:
         # Stopping the run is something the caller asked for, so it is reported
         # rather than dumped: a traceback here says the tool broke. The number is
@@ -315,6 +332,28 @@ def main(argv: list[str] | None = None) -> int:
             fmt=_resolve_format(_requested_format(args_list)),
         )
         _leave_now(EXIT_INTERRUPTED)
+    except BrokenPipeError:
+        # Whoever was reading stdout has gone, which is what `| head` does on
+        # purpose. Nothing is reported, because there is nobody to report to and
+        # an envelope on every `| head` would be noise; and nothing is blamed on
+        # the tool, which is what the catch-all below did - a traceback and an
+        # invitation to file a bug, for having used a pipe. The number is the one
+        # a shell reports for a filter killed by SIGPIPE. Leaving here rather than
+        # returning also skips the interpreter's own flush of a stdout that cannot
+        # take it, which prints its complaint as an ignored exception.
+        _leave_now(EXIT_BROKEN_PIPE)
+    except SystemExit:
+        # `--help` and `--version` are printed by argparse, which then exits from
+        # inside the parser rather than returning. Those writes are buffered, so a
+        # stdout nobody is reading does not fail until the interpreter flushes on
+        # the way out - past every handler here, where it becomes exit 120 and a
+        # complaint about an ignored exception. Flushing now puts the failure back
+        # somewhere it can be answered; a flush that works changes nothing.
+        try:
+            sys.stdout.flush()
+        except BrokenPipeError:
+            _leave_now(EXIT_BROKEN_PIPE)
+        raise
     except Exception as err:
         # The traceback is the whole value of an unexpected failure, so it goes to
         # stderr above the envelope, leaving the last line machine-readable.

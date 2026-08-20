@@ -89,8 +89,12 @@ Exit codes:
 | 2 | usage error |
 | 4 | environment error: Chromium is not installed for playwright |
 | 5 | internal error: shinylive-check itself failed and reached no verdict |
+| 130 | interrupted by SIGINT, Ctrl-C included, before a verdict |
+| 141 | whatever was reading stdout closed it, as a pipe into `head` does |
 
 Exit 5 is deliberately not 1. A crash in the tool and a verdict of "this app is broken" are different facts, and a CI job that cannot tell them apart reports a tooling failure as a failing app. On exit 5 stdout stays empty and stderr carries the traceback above the JSON envelope, so the last line is still machine-readable.
+
+130 and 141 rest on the same distinction, and both are the number a shell reports for the signal involved. A run stopped by Ctrl-C was abandoned rather than judged, and a reader that stopped reading is not a fault at all: `shinylive-check site | head` ends like every other filter in that pipeline, silently, rather than with a traceback blaming the tool.
 
 ## In CI
 
