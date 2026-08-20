@@ -9,22 +9,44 @@ output must be reading the tool's verdict, not the page's.
 from __future__ import annotations
 
 import json
+import unicodedata
 
 import pytest
 from conftest import run_cli
 
 pytestmark = pytest.mark.browser
 
-# Written as JS escapes so the fixture file itself holds no control byte.
+# Written as JS escapes so the fixture file itself holds no control byte, and so
+# the page's encoding cannot change what the JS engine hands to the console.
 HOSTILE_PAGE = """<html><body><script>
 console.error("\\x1b[2K\\x1b[1GOK: 1 output rendered in 0.3s at http://evil.example/");
 console.error("boom\\nOK: 1 output rendered in 0.1s at http://forged.example/");
 console.error("bell\\x07 backspace\\x08 done");
+console.error("sep\\u2028OK: 1 output rendered in 0.2s at http://split.example/");
+console.error("para\\u2029OK: 1 output rendered in 0.4s at http://broken.example/");
+console.error("bidi\\u202ereversed\\u202c end");
+console.error("bom\\ufeffzero\\u200bwidth\\u200emark");
 </script></body></html>
 """
 
-CONTROL_BYTES = {chr(code) for code in range(0x20)} - {"\n", "\t"}
-CONTROL_BYTES |= {chr(code) for code in range(0x7F, 0xA0)}
+
+def steers_the_reader(char: str) -> bool:
+    """Whether this character acts on the terminal instead of saying something.
+
+    Derived from the promise in `_printable`'s docstring - text is reported,
+    control of the screen is not - by asking the Unicode database what a
+    character IS, rather than restating the ranges the implementation happens to
+    filter. Those are not the same question, and the difference is the whole
+    reason this helper exists: the ranges covered `Cc` only, so `\\u202e` walked
+    through a filter whose tests could not express what it was for.
+
+    `Cc` control, `Cf` format - the bidi overrides, which reverse the order a
+    line is read in without changing a byte of it - and `Cs`, whose members
+    cannot be encoded at all. Newline and tab are how the tool formats a
+    traceback and are the page's only way to ask for a line break, which
+    `_detail` grants by indenting it; a line break is not screen control.
+    """
+    return char not in "\n\t" and unicodedata.category(char) in {"Cc", "Cf", "Cs"}
 
 
 def hostile_site(tmp_path):
@@ -37,8 +59,8 @@ def hostile_site(tmp_path):
 def test_page_text_cannot_repaint_the_terminal(tmp_path):
     proc = run_cli(str(hostile_site(tmp_path)), "--timeout", "15", "-o", "text")
     assert proc.returncode == 1, proc.stdout + proc.stderr
-    leaked = sorted(CONTROL_BYTES & set(proc.stdout))
-    assert not leaked, f"control bytes reached stdout: {[hex(ord(c)) for c in leaked]}"
+    leaked = sorted(char for char in set(proc.stdout) if steers_the_reader(char))
+    assert not leaked, f"steering characters reached stdout: {[hex(ord(c)) for c in leaked]}"
 
 
 def test_page_text_cannot_forge_a_verdict_line(tmp_path):
@@ -50,6 +72,13 @@ def test_page_text_cannot_forge_a_verdict_line(tmp_path):
     # a line at column 0 is the tool speaking, and only the tool may speak there.
     forged = [line for line in lines[1:] if line and not line.startswith("  ")]
     assert not forged, f"page text reached column 0: {forged}"
+    # Each forged headline arrived and was indented, rather than being missing: a
+    # test that only looks at column 0 passes just as well on a page that said
+    # nothing at all. The four differ in how they try to reach column 0 - a cursor
+    # move, a newline, a line separator and a paragraph separator - so this also
+    # pins that the indent covers every break `splitlines` knows, not just `\\n`.
+    for host in ("evil.example", "forged.example", "split.example", "broken.example"):
+        assert any(host in line for line in lines[1:]), f"{host} never arrived: {lines}"
 
 
 def test_an_enormous_console_error_cannot_blow_up_the_verdict(tmp_path):
@@ -160,4 +189,5 @@ def test_the_error_text_is_still_reported(tmp_path):
     joined = " ".join(verdict["errors"])
     assert "boom" in joined
     assert "bell" in joined and "done" in joined
-    assert not CONTROL_BYTES & set(joined)
+    assert "zero" in joined and "width" in joined
+    assert not [char for char in set(joined) if steers_the_reader(char)]

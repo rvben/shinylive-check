@@ -85,8 +85,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `OSError` and discarded the verdict the caller came for.
 - The server followed symlinks out of the export directory, so an export
   containing a link to a file elsewhere on the host served that file to the page.
-- Text chosen by the checked page is stripped of control characters and indented
-  under the verdict, so it cannot repaint the terminal or forge a headline.
+- Text chosen by the checked page is stripped of the characters that steer a
+  reader and indented under the verdict, so it cannot repaint the terminal or
+  forge a headline. What is dropped is decided by Unicode category rather than by
+  a list of ranges: escape sequences and the rest of `Cc`, but also `Cf`, where
+  the bidi overrides live - `U+202E` reverses the order the rest of a line is
+  read in while leaving every byte of it intact - and `Cs`, whose members encode
+  to neither UTF-8 nor JSON and would turn a page's console message into this
+  tool's own crash.
 - A malformed `--expect` selector was reported as the app failing. Chromium
   rejects a bad selector in more than one wording and only one was recognised, so
   `--expect "div:nonsense(1)"` ran the full timeout and returned

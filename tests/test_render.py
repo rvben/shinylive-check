@@ -11,7 +11,6 @@ import json
 from typing import Any
 
 from shinylive_check.check import (
-    _KEEP_CONTROLS,
     CheckResult,
     ExpectResult,
     _bounded,
@@ -177,11 +176,26 @@ def test_the_json_cost_model_agrees_with_the_encoder_it_predicts():
     survivors = [
         chr(code)
         for code in [*range(0, 0x2000), 0x1F4A5, 0x1F600, 0x10FFFF]
-        if chr(code) in _KEEP_CONTROLS or not (code < 0x20 or 0x7F <= code <= 0x9F)
+        if _printable(chr(code)) == chr(code)
     ]
-    assert len(survivors) > 8000, "the sample has to actually cover the range"
+    assert len(survivors) > 6000, "the sample has to actually cover the range"
     wrong = [(hex(ord(c)), _json_cost(c), len(json.dumps(c)) - 2) for c in survivors]
     assert [entry for entry in wrong if entry[1] != entry[2]] == []
+
+
+def test_nothing_surviving_sanitising_can_break_the_tools_own_output():
+    """Whatever gets through still has to be something the tool can print.
+
+    Every reported string is written to stdout and to JSON, and a lone surrogate
+    encodes to neither: it would turn a page's console message into this tool's
+    own UnicodeEncodeError, reported as an internal failure against a site that
+    was merely unusual. No page has been observed producing one - Chromium hands
+    over U+FFFD - so this is not a live hole; it is the reason the filter is a
+    question about what a character IS rather than a list of the ones seen so far.
+    """
+    for char in ("\ud800", "\udfff", "\ud83d"):
+        assert _printable(f"a{char}b") == "ab"
+    assert _printable("a\ud800b").encode("utf-8") == b"ab"
 
 
 def test_a_bounded_message_stays_under_its_byte_ceiling_in_any_alphabet():

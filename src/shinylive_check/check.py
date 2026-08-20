@@ -11,6 +11,7 @@ errors, and the Shiny output elements inside the app frame.
 from __future__ import annotations
 
 import time
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -60,9 +61,17 @@ _FRAME_SCAN = """
 _POLL_MILLIS = 500
 _SETTLE_MILLIS = 500
 
-# Newlines and tabs survive because tracebacks need them; every other control
-# character is dropped.
+# Newlines and tabs survive because tracebacks need them, and because a line
+# break is the one piece of formatting the page is allowed to ask for: `_detail`
+# grants it by indenting the new line, so it cannot reach column 0.
 _KEEP_CONTROLS = frozenset("\n\t")
+
+# What is dropped is decided by what a character IS, not by the ranges anyone
+# thought to list. `Cc` control, `Cf` format - which is where the bidi overrides
+# live, and reversing the order a line reads in is screen control even though
+# every byte of the text is intact - and `Cs`, whose members encode to neither
+# UTF-8 nor JSON and would make a page's console message this tool's own crash.
+_STEERING_CATEGORIES = frozenset({"Cc", "Cf", "Cs"})
 
 # The page decides how long its errors are, so the tool has to decide how long its
 # verdict is. Comfortably more than any real traceback, far less than a CI log
@@ -106,8 +115,10 @@ def _printable(text: str) -> str:
 
     Console messages and page errors are written by the page, and the verdict
     they land in is read in a terminal. Escape sequences there can erase lines
-    and move the cursor, so a hostile or broken page could repaint the check's
-    own verdict. Text is reported; control of the screen is not.
+    and move the cursor, and a bidi override can reverse the order the rest of a
+    line is read in without touching its bytes, so a hostile or broken page could
+    repaint the check's own verdict. Text is reported; control of the screen is
+    not.
 
     Size is bounded for the same reason: an app that dumps a large repr into
     console.error would otherwise choose the size of this tool's stdout, and the
@@ -119,7 +130,7 @@ def _printable(text: str) -> str:
     clean = "".join(
         char
         for char in text
-        if char in _KEEP_CONTROLS or not (ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F)
+        if char in _KEEP_CONTROLS or unicodedata.category(char) not in _STEERING_CATEGORIES
     )
     spent = 0
     for index, char in enumerate(clean):
