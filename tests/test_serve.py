@@ -78,6 +78,38 @@ def test_a_symlink_inside_the_export_still_works(tmp_path):
     assert "inside" in body
 
 
+def test_a_symlink_loop_inside_the_export_is_refused(tmp_path):
+    """A link that leads back to itself is a 404, not a dropped connection.
+
+    Resolving one raises RuntimeError rather than OSError on every Python before
+    3.13, and the containment guard caught only OSError. The request therefore
+    escaped the 404 the guard exists to give it: the handler thread died with a
+    traceback on the server's stderr and the connection closed with no reply at
+    all, which reads to the caller as the tool crashing rather than as an export
+    containing something it may not serve.
+
+    On 3.13 and later `resolve` returns instead of raising and the open that
+    follows fails with ELOOP, so the same 404 arrives by another road. This test
+    is the whole matrix's, and only the older half of it can fail.
+    """
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "index.html").write_text("<html><body>export</body></html>")
+    (site / "loop.txt").symlink_to(site / "loop2.txt")
+    (site / "loop2.txt").symlink_to(site / "loop.txt")
+    server, url = serve_directory(site)
+    try:
+        status, _ = fetch(url + "loop.txt")
+    except OSError as err:
+        raise AssertionError(
+            f"the server dropped the connection instead of refusing the link: {err!r}"
+        ) from err
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert status == 404
+
+
 def test_parent_traversal_is_not_served(tmp_path):
     site = export_with_symlink(tmp_path)
     server, url = serve_directory(site)

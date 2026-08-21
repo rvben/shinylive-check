@@ -154,6 +154,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `OSError` and discarded the verdict the caller came for.
 - The server followed symlinks out of the export directory, so an export
   containing a link to a file elsewhere on the host served that file to the page.
+  A link that points at itself is refused the same way rather than crashing the
+  handler: resolving a loop raises rather than returning a path on every Python
+  before 3.13, and an uncaught one closes the connection with no reply and
+  prints a traceback that reads as this tool breaking rather than as an export
+  holding a link it may not follow.
 - Text chosen by the checked page is stripped of the characters that steer a
   reader and indented under the verdict, so it cannot repaint the terminal or
   forge a headline. What is dropped is decided by Unicode category rather than by

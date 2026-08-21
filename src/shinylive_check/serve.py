@@ -28,7 +28,12 @@ class _QuietHandler(SimpleHTTPRequestHandler):
         root = Path(self.directory).resolve()
         try:
             target = Path(self.translate_path(self.path)).resolve()
-        except OSError:
+        # A symlink loop is RuntimeError rather than OSError on every Python before
+        # 3.13, and an uncaught one kills the handler thread: the connection closes
+        # with no reply and the traceback lands on the server's stderr, which reads
+        # as this tool crashing rather than as an export holding a link it may not
+        # follow.
+        except (OSError, RuntimeError):
             self.send_error(404, "File not found")
             return None
         if target != root and root not in target.parents:
