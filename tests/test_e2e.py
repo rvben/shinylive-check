@@ -125,23 +125,40 @@ def test_a_boot_cut_short_by_the_timeout_is_not_a_broken_app(ok_site):
     Which wait verdict it is - `navigation` for a page that never finished
     loading, `timeout` for one that loaded and never rendered - is the machine's
     business rather than this test's, because the budget covers launching the
-    browser too. Pinning one of them meant guessing a number that lands between
-    the phases, and there is no such number: `--timeout 1` flipped run to run on
-    this laptop, and `--timeout 3` still failed under the floor venv, where a
-    loaded machine spent the whole budget before the page was up. Both classes
-    are already pinned where they can be asked deterministically: `timeout`
-    against this same export with a generous budget and an `--expect` that is
-    never satisfied, and `navigation` against a host that never answers.
+    browser too. Both classes are already pinned where they can be asked
+    deterministically: `timeout` against this same export with a generous budget
+    and an `--expect` that is never satisfied, and `navigation` against a host
+    that never answers.
+
+    The budget is measured rather than guessed, because every constant tried here
+    landed on the wrong side of a boot somewhere: `--timeout 1` flipped run to run
+    on this laptop, `--timeout 3` failed under the floor venv where a loaded
+    machine spent the whole budget before the page was up, and later passed one
+    run in five on a warm cache, where the export booted in three seconds and the
+    check truthfully said so. There is no such number, because what it has to fall
+    inside is how long a boot takes on the machine running the test. So a full
+    boot is measured first and the next one is cut at half of it.
     """
-    proc = run_cli(str(ok_site), "--timeout", "3", "-o", "json")
+    full = run_cli(str(ok_site), "--timeout", "90", "-o", "json")
+    assert full.returncode == 0, full.stdout + full.stderr
+    booted = json.loads(full.stdout)["seconds"]
+    # The premise, asserted rather than assumed: a real pyodide boot is not
+    # instant, so half of one is a budget that expires during a boot.
+    assert booted > 1, booted
+    # Halved rather than shaved, because the error is one-sided. Cutting too early
+    # only moves the verdict from `timeout` to `navigation`, which this test
+    # accepts either way; cutting too late lets the app finish and is the single
+    # way to break it. The second boot also runs against a cache the first one
+    # warmed, so it is the faster of the two.
+    proc = run_cli(str(ok_site), "--timeout", str(round(booted / 2, 1)), "-o", "json")
     assert proc.returncode == 1, proc.stdout + proc.stderr
     verdict = json.loads(proc.stdout)
     assert verdict["ok"] is False
     assert verdict["failure"] in {"timeout", "navigation"}, verdict
     # And the budget was honoured: this is a check that stopped, not one that ran
-    # long and happened to be judged. Generous, since the poll granularity and a
-    # browser that has to be closed both land on top of the budget.
-    assert verdict["seconds"] < 10, verdict["seconds"]
+    # long and happened to be judged. Measured against the boot it was cut from,
+    # which is the only bound on this that means the same thing on every machine.
+    assert verdict["seconds"] < booted, verdict["seconds"]
 
 
 def test_missing_chromium_is_an_environment_error(ok_site, tmp_path):
