@@ -6,6 +6,7 @@ import argparse
 import contextlib
 import io
 import json
+import math
 import os
 import sys
 import traceback
@@ -402,6 +403,18 @@ def _dispatch(args_list: list[str]) -> int:
             args = build_parser().parse_args(args_list)
         fmt = _resolve_format(None if args.output == "auto" else args.output)
 
+        # Neither of these survives a comparison against zero on its own: `nan`
+        # compares false against every bound and `inf` compares true against one it
+        # never reaches, so both passed a positivity check and reached the browser,
+        # where converting the remaining budget raised and reported the caller's
+        # typo as a bug in this tool.
+        #
+        # Finiteness is asked first for the sake of `-inf`, the one value both
+        # questions answer. Calling it a number smaller than zero is true and
+        # useless, since it invites a larger one; what is wrong with it is that it
+        # is not a duration at all.
+        if not math.isfinite(args.timeout):
+            raise UsageError(f"--timeout must be a finite number of seconds, got {args.timeout:g}")
         if args.timeout <= 0:
             raise UsageError(f"--timeout must be greater than zero, got {args.timeout:g}")
 

@@ -124,8 +124,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   30 second limit, so a check pointed at a host that accepts the connection and
   then never answers took 30.7 s to give up on a `--timeout 3`, and no value
   below 30 could shorten it. `--timeout` is now the budget for the whole check,
-  page load included. A non-positive `--timeout` is a usage error rather than a
-  silent wait forever, which is how the browser reads a zero timeout.
+  page load included. A `--timeout` that is not a positive, finite number of
+  seconds is a usage error rather than a silent wait forever, which is how the
+  browser reads a zero timeout. Finiteness is asked as well as size, because
+  `nan` compares false against every bound and `inf` compares true against one
+  it never reaches: a positivity test alone lets both through to the browser,
+  where converting what is left of such a budget raises and reports the caller's
+  typo as a bug in this tool.
 - A Shiny output that entered an error state during the 500 ms settle window was
   reported as a pass. Console errors arrive as events and were re-read, but an
   output failing inside the window is DOM state and was only visible to another

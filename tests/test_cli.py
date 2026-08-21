@@ -54,6 +54,39 @@ def test_port_with_url_target_is_a_usage_error():
     assert "--port" in proc.stderr
 
 
+def test_a_timeout_that_is_not_a_finite_number_is_a_usage_error():
+    """`nan` and `inf` are floats that a positivity test cannot reject.
+
+    `nan` compares false against every bound, including the one that rejects zero,
+    and `inf` compares true against a limit it can never reach, so both passed
+    validation and reached the browser. Turning what was left of such a budget into
+    a playwright timeout then raised inside the tool: a flag typed wrong was
+    reported as exit 5, a traceback, and an invitation to file a bug against
+    shinylive-check, which is precisely the outcome that exit code exists to keep
+    apart from the user's own mistakes.
+
+    The target is a port nothing answers on, which is the point: a budget that is
+    not a number is refused before anything is launched or dialled, so no site has
+    to exist for this to be a usage error.
+
+    `-inf` is the value both questions answer, and it decides which one is asked
+    first. "Not greater than zero" is true of it and sends the reader looking for a
+    larger number; what is actually wrong is that it is not a duration, so that is
+    what it has to be told. It is spelled with an `=` because argparse reads a bare
+    `-inf` as a flag and answers "expected one argument" instead - a usage error
+    naming `--timeout`, which is close enough to this one to pass a test that only
+    asked for those two things.
+    """
+    for value in ("--timeout=nan", "--timeout=inf", "--timeout=-inf"):
+        proc = run_cli("http://127.0.0.1:9/", value)
+        assert proc.returncode == 2, f"{value}: " + proc.stdout + proc.stderr
+        envelope = json.loads(proc.stderr)
+        assert envelope["error"]["kind"] == "usage", (value, envelope)
+        message = envelope["error"]["message"]
+        assert "--timeout" in message, (value, envelope)
+        assert "finite" in message, (value, envelope)
+
+
 def test_version_prints_a_version():
     proc = run_cli("--version")
     assert proc.returncode == 0
