@@ -391,10 +391,21 @@ def _remaining_millis(deadline: float) -> int:
 def _partition(said: list[_Said], failed_loads: set[str]) -> tuple[list[str], list[str]]:
     """Split what the page said into the app's own errors and its failed loads.
 
-    Done here rather than as each message arrives because the two events are not
-    ordered: the console error for a 404 can be delivered before or after the
-    response that proves the load failed. Deciding at the end is deciding on all
-    the evidence.
+    Matched by URL when a verdict is wanted rather than as each message arrives,
+    so a network event landing between the console error and that verdict is
+    still in evidence. The slack is not what makes the classification safe. A
+    console error for a failed load is written by the renderer after it is told
+    the load failed, and both events reach this process over one ordered
+    connection, so the network event is seen first: measured at 250 of 250 failed
+    resources, 404s (which arrive as a response) and refused connections (which
+    arrive as `requestfailed`) alike. The slack covers the case where that ceases
+    to hold, and covers it only as far as the next verdict, because a message
+    still unmatched then is read as the app's own.
+
+    Shape alone would not do instead of the URL match. A blocked inline script is
+    the same shape, no console arguments and located at a URL, and no network
+    event ever arrives to explain it, which is correct: the browser refused
+    something in the page rather than failing to fetch it.
     """
     app: list[str] = []
     resource: list[str] = []
