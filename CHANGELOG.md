@@ -29,6 +29,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in the verdict and a `resource-error` failure kind. Resources the browser could
   not load are reported on a pass as well as a failure, so ignoring one does not
   mean hiding it.
+- `--ignore-console SUBSTR`, repeatable, with `ignored_errors` and
+  `ignored_errors_total` in the verdict. Some libraries print an error that is not
+  one, and the only ways past a single known message were to stop running the
+  check or to stop believing it. A matched error is reported on a pass as well as
+  a failure, naming the flag that exempted it, so what a team has decided to
+  tolerate stays legible instead of living in a CI config nobody rereads. The
+  match is a case-sensitive substring against the app's own console and page
+  errors, and reaches nothing else: a failed load keeps its own switch, and the
+  check's own account of a site that would not load or that answered with an
+  error status is not a console error and is never exempted, so a verdict cannot
+  report a failure while filing the reason for it as ignored. An empty pattern is
+  a usage error rather than a silent all-clear, from `run_check` as well as from
+  the command line, since importing the function must not be a way around the
+  invariant it exists to hold.
 
 ### Fixed
 

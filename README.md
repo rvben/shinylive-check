@@ -77,6 +77,7 @@ The runtime check is what stops a static shell from passing. An export serves it
 - `--expect SELECTOR` (repeatable): CSS selectors that must be visible, replacing the default at-least-one-rendered-output condition. For apps whose UI is inputs only, or when "booted" means something specific: `--expect "#sales" --expect ".value-box"`. The runtime check still applies, and the selectors must be satisfied at the same moment, not one at a time.
 - `--screenshot PATH`: write a full-page screenshot when the check fails, for the CI artifact that shows what the visitor would have seen.
 - `--fail-on-resource-error`: also fail when the browser could not load a resource. Off by default, because a missing sourcemap, a stale cache-busted webfont or an image nobody deployed is not the app being broken, and a check that reddens CI for one is a check a team learns to ignore. Failed loads are reported either way, as `resource_errors`.
+- `--ignore-console SUBSTR` (repeatable): do not fail on a console or page error containing this text, matched as a case-sensitive substring. For the library that prints an error that is not one, so the choice is exempting the message rather than switching off the check. What matches is still counted and still printed, as `ignored_errors`, on a pass as much as on a failure; an error the pattern does not match still fails as before. A pattern reaches what the app said and nothing else: a failed load keeps its own switch, and what the check itself reports about a site that would not load or that answered with an error status is never exempted, since that is the reason the check ended rather than something it ignored. An empty pattern is refused, since it would match everything.
 - `--port PORT`: serve a directory target on a fixed port instead of an ephemeral one, for exports that reference themselves by absolute URL.
 - `-o, --output auto|text|json` (default `auto`): the verdict format on stdout. `auto` emits JSON when stdout is not a TTY, the human-readable form otherwise.
 
@@ -143,13 +144,15 @@ $ shinylive-check site | jq .
   "output_errors_total": 0,
   "resource_errors": [],
   "resource_errors_total": 0,
+  "ignored_errors": [],
+  "ignored_errors_total": 0,
   "expects": [],
   "failure": null,
   "screenshot": null
 }
 ```
 
-The two lists are what the page said, and a page can say a great deal: long messages are truncated and each list is clipped to the earliest 50 entries, with a marker naming what was dropped. `errors_total` and `output_errors_total` are the numbers that actually occurred, so read those for a count and never `len(errors)`.
+The message lists are what the page said, and a page can say a great deal: long messages are truncated and each list is clipped to the earliest 50 entries, with a marker naming what was dropped. Every one of them has a `_total` beside it holding the number that actually occurred, so read that for a count and never `len(errors)`.
 
 `failure` is `null` on a pass and one of `error`, `output-error`, `resource-error`, `timeout`, `navigation` or `http-status` otherwise. Exit code 1 is a declared outcome, not an error: the check ran and the verdict is on stdout, like `grep` finding nothing. Real errors (a wrong invocation, a missing browser, an internal failure) go to stderr as a one-line JSON envelope, `{"error": {"kind": ..., "message": ..., "hint": ...}}`, when the output format is JSON.
 

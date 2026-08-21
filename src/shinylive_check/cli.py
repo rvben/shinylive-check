@@ -130,6 +130,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="fail the check when the browser could not load a resource (a 404 asset, "
         "a missing sourcemap); reported but ignored by default",
     )
+    parser.add_argument(
+        "--ignore-console",
+        action="append",
+        default=[],
+        metavar="SUBSTR",
+        help="do not fail on a console or page error containing this text; repeatable. "
+        "Matched errors are still counted and reported",
+    )
     _add_output_flag(parser, "verdict")
     parser.add_argument(
         "--port",
@@ -418,6 +426,17 @@ def _dispatch(args_list: list[str]) -> int:
         if args.timeout <= 0:
             raise UsageError(f"--timeout must be greater than zero, got {args.timeout:g}")
 
+        # Every string contains the empty one, so accepting it would quietly turn a
+        # named exemption into "ignore all console errors", which is the one thing
+        # this tool is for noticing. It arrives that way from a shell variable that
+        # did not expand, and the useful answer names the flag that came up empty.
+        if any(not pattern for pattern in args.ignore_console):
+            raise UsageError(
+                "--ignore-console needs the text to match; an empty pattern would ignore "
+                "every console error",
+                hint="quote the substring, and check the variable it came from is set",
+            )
+
         if args.target.startswith(("http://", "https://")):
             if args.port:
                 raise UsageError("--port applies only to a directory target")
@@ -437,6 +456,7 @@ def _dispatch(args_list: list[str]) -> int:
             expects=tuple(args.expect),
             screenshot=args.screenshot,
             fail_on_resource_error=args.fail_on_resource_error,
+            ignore_console=tuple(args.ignore_console),
             progress=_heartbeat(_HEARTBEAT_SECONDS, sys.stderr.write),
         )
     except (UsageError, SelectorError) as err:
@@ -492,6 +512,23 @@ def _resource_lines(result: CheckResult) -> list[str]:
     return lines
 
 
+def _ignored_lines(result: CheckResult) -> list[str]:
+    """Errors `--ignore-console` matched, on a pass as well as a failure.
+
+    An exemption that prints nothing is an exemption nobody revisits: the message
+    can change, or the app can start printing it for a new reason, and the only
+    record of what is being tolerated would be a CI config nobody rereads. It says
+    which flag did it for the same reason the resource line does.
+    """
+    if not result.ignored_errors_total:
+        return []
+    plural = "" if result.ignored_errors_total == 1 else "s"
+    lines = [f"  {result.ignored_errors_total} console error{plural} ignored (--ignore-console):"]
+    for text in result.ignored_errors:
+        lines += _detail(text, "ignored: ")
+    return lines
+
+
 def render_text(result: CheckResult) -> str:
     """The one-glance verdict: a headline, then every reason it failed."""
     if result.ok:
@@ -501,7 +538,7 @@ def render_text(result: CheckResult) -> str:
         )
         if result.expects:
             line += f" ({len(result.expects)} expect selector(s) satisfied)"
-        return "\n".join([line, *_resource_lines(result)])
+        return "\n".join([line, *_ignored_lines(result), *_resource_lines(result)])
 
     headlines = {
         # The counts are what OCCURRED, not what is listed below: the lists are
@@ -526,6 +563,7 @@ def render_text(result: CheckResult) -> str:
         lines += _detail(error)
     for text in result.output_errors:
         lines += _detail(text, "output error: ")
+    lines += _ignored_lines(result)
     lines += _resource_lines(result)
     lines += [
         f"  expect not satisfied: {expect.selector}"

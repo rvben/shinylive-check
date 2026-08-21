@@ -202,6 +202,53 @@ def test_a_refused_connection_fails_as_navigation():
     assert json.loads(proc.stdout)["failure"] == "navigation"
 
 
+def test_a_navigation_failure_is_never_an_ignored_console_error():
+    """What the check says about a dead site is not what the page said.
+
+    `net::ERR_` is a plausible thing to exempt: a third-party beacon that will
+    not load writes it to the console on every run. The message the check writes
+    when the site ITSELF will not load carries the same text, so matching it
+    there moved the only diagnosis the verdict had, leaving `failure:
+    "navigation"` beside an empty `errors` list and the reason for it filed as an
+    ignored console error - which it was not, and which had not been ignored,
+    since it is what ended the check.
+    """
+    proc = run_cli(
+        "http://127.0.0.1:1/", "--ignore-console", "net::ERR_", "--timeout", "20", "-o", "json"
+    )
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    verdict = json.loads(proc.stdout)
+    assert verdict["failure"] == "navigation"
+    assert verdict["ignored_errors"] == []
+    # Asserted by prefix: Chromium words a refused connection and a blocked port
+    # differently, and which one a host answers with is not this test's subject.
+    assert "net::ERR_" in " ".join(verdict["errors"])
+
+
+def test_an_error_status_is_never_an_ignored_console_error(tmp_path):
+    """The same rule for the other verdict the check words itself.
+
+    A pattern is read against what the app said, and an HTTP status is the check
+    reporting what it was served. Exempting it would leave a verdict that failed
+    on a status it also claimed to be ignoring.
+    """
+    server = _JoiningServer(("127.0.0.1", 0), _NotFound)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{server.server_address[1]}/"
+        proc = run_cli(url, "--ignore-console", "HTTP 404", "--timeout", "20", "-o", "json")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    verdict = json.loads(proc.stdout)
+    assert verdict["failure"] == "http-status"
+    assert verdict["ignored_errors"] == []
+    assert "404" in " ".join(verdict["errors"])
+
+
 def test_an_output_in_an_error_state_fails_as_output_error(tmp_path):
     """No console error anywhere: only the output element says the app is broken."""
     site = page(tmp_path, '<div class="shiny-bound-output shiny-output-error">boom in output</div>')
@@ -341,6 +388,129 @@ def test_an_ignored_resource_error_is_still_visible_on_a_pass(tmp_path):
     assert proc.stdout.startswith("OK:")
     assert "resource error" in proc.stdout
     assert "--fail-on-resource-error" in proc.stdout
+
+
+def test_an_ignored_console_error_does_not_fail_the_check(tmp_path):
+    """The escape hatch for a message a team has already decided about.
+
+    Some libraries print an error that is not one, and until now the only ways
+    past it were to stop running the check or to stop believing it. The exemption
+    is per message and named on the command line, so what is being tolerated is
+    written down where the next person can read it.
+    """
+    site = page(
+        tmp_path,
+        f'{RENDERED}\n<script>console.error("ResizeObserver loop limit exceeded");</script>',
+        name="ignored-console",
+    )
+    proc = run_cli(
+        str(site), "--ignore-console", "ResizeObserver loop", "--timeout", "20", "-o", "json"
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    verdict = json.loads(proc.stdout)
+    assert verdict["errors"] == []
+    assert verdict["ignored_errors_total"] == 1
+    assert "ResizeObserver loop limit exceeded" in " ".join(verdict["ignored_errors"])
+
+
+def test_a_console_error_no_pattern_matches_still_fails(tmp_path):
+    """The control: the exemption has to be the substring doing the work.
+
+    Same page, a pattern that does not match it. An implementation that ignored
+    every console error whenever the flag was given would pass this too, and would
+    have turned the flag into the blanket switch it is deliberately not.
+    """
+    site = page(
+        tmp_path,
+        f'{RENDERED}\n<script>console.error("ResizeObserver loop limit exceeded");</script>',
+        name="unmatched-console",
+    )
+    proc = run_cli(str(site), "--ignore-console", "something else", "--timeout", "20", "-o", "json")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    verdict = json.loads(proc.stdout)
+    assert verdict["failure"] == "error"
+    assert verdict["ignored_errors"] == []
+
+
+def test_only_the_matching_error_is_exempted(tmp_path):
+    """A page saying two things gets one answer per thing.
+
+    The exemption is per message, so an app that prints a known-harmless message
+    and then really breaks still fails, and the verdict says which was which.
+    """
+    site = page(
+        tmp_path,
+        f"{RENDERED}\n<script>console.error('known noise'); console.error('real boom');</script>",
+        name="two-console-errors",
+    )
+    proc = run_cli(str(site), "--ignore-console", "known noise", "--timeout", "20", "-o", "json")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    verdict = json.loads(proc.stdout)
+    assert verdict["failure"] == "error"
+    assert "real boom" in " ".join(verdict["errors"])
+    assert "known noise" not in " ".join(verdict["errors"])
+    assert "known noise" in " ".join(verdict["ignored_errors"])
+
+
+def test_an_uncaught_page_error_can_be_ignored_too(tmp_path):
+    """A thrown error reaches the same list, so the flag has to reach it as well.
+
+    Console errors and uncaught exceptions are one field in the verdict and one
+    headline in the text. Exempting only half of that would make the flag work or
+    not depending on how the noisy library happened to report itself.
+    """
+    site = page(
+        tmp_path,
+        RENDERED + '\n<script>setTimeout(() => { throw new Error("known throw"); }, 100);</script>',
+        name="ignored-pageerror",
+    )
+    proc = run_cli(str(site), "--ignore-console", "known throw", "--timeout", "20", "-o", "json")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    verdict = json.loads(proc.stdout)
+    assert verdict["errors"] == []
+    assert "known throw" in " ".join(verdict["ignored_errors"])
+
+
+def test_ignore_console_does_not_reach_a_failed_load(tmp_path):
+    """The two exemptions stay apart, so neither can be turned off by the other.
+
+    A failed load has its own switch and its own list. Letting a console pattern
+    match one as well would mean `--ignore-console 404` silently disarming
+    `--fail-on-resource-error`, and the message a resource error carries is written
+    by the browser, so the pattern that disarmed it would not even be the app's
+    own words.
+    """
+    site = page(tmp_path, f'{RENDERED}\n<img src="missing.png" alt="">', name="ignore-vs-resource")
+    proc = run_cli(
+        str(site),
+        "--fail-on-resource-error",
+        "--ignore-console",
+        "Failed to load resource",
+        "--timeout",
+        "20",
+        "-o",
+        "json",
+    )
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    verdict = json.loads(proc.stdout)
+    assert verdict["failure"] == "resource-error"
+    assert verdict["ignored_errors"] == []
+
+
+def test_an_ignored_console_error_is_still_visible_on_a_pass(tmp_path):
+    """Ignored must not mean hidden, end to end and in the text a person reads."""
+    site = page(
+        tmp_path,
+        f'{RENDERED}\n<script>console.error("ResizeObserver loop limit exceeded");</script>',
+        name="visible-ignored",
+    )
+    proc = run_cli(
+        str(site), "--ignore-console", "ResizeObserver loop", "--timeout", "20", "-o", "text"
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert proc.stdout.startswith("OK:")
+    assert "ResizeObserver loop limit exceeded" in proc.stdout
+    assert "--ignore-console" in proc.stdout
 
 
 def test_an_unhandled_promise_rejection_fails_the_check(tmp_path):

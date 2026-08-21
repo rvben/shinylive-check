@@ -87,6 +87,32 @@ def test_a_timeout_that_is_not_a_finite_number_is_a_usage_error():
         assert "finite" in message, (value, envelope)
 
 
+def test_an_empty_ignore_console_pattern_is_a_usage_error():
+    """`--ignore-console ""` matches every message, and is not what anyone meant.
+
+    The flag exempts a named message. An empty substring is in every string, so
+    accepting it would turn a per-message exemption into a switch that ignores all
+    console errors at once, which is the thing this tool exists to notice. Someone
+    typing it has a shell variable that did not expand, and the useful answer is
+    which flag was empty rather than a green check on a broken app.
+
+    The target is a port nothing answers on: a pattern that cannot be meant is
+    refused before anything is launched or dialled.
+
+    The message has to say the pattern was empty, not merely name the flag. A
+    parser that has never heard of `--ignore-console` also answers exit 2 with a
+    usage envelope naming it, so asking only for those two things is a test that
+    passes before the flag exists.
+    """
+    proc = run_cli("http://127.0.0.1:9/", "--ignore-console", "")
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    envelope = json.loads(proc.stderr)
+    assert envelope["error"]["kind"] == "usage", envelope
+    message = envelope["error"]["message"]
+    assert "--ignore-console" in message, envelope
+    assert "empty" in message, envelope
+
+
 def test_version_prints_a_version():
     proc = run_cli("--version")
     assert proc.returncode == 0

@@ -173,7 +173,7 @@ class ExpectResult:
 
 @dataclass
 class _Said:
-    """One message the page produced, with where the browser located it.
+    """One message about the page, with where the browser located it.
 
     ``origin`` is the URL a console error was located at, and is set only when the
     error carried no console arguments. That pair is the shape Chromium
@@ -183,10 +183,19 @@ class _Said:
 
     Deliberately not a text match. Chromium's wording for a failed load is fixed,
     so a page that printed that sentence could otherwise silence its own errors.
+
+    ``from_page`` is false for the two messages the CHECK writes rather than the
+    page: a navigation that failed and an error status. They travel in this list
+    because the verdict's ``errors`` is where a reader looks for why a check
+    failed, but they are this tool's own words about a page that never ran, so no
+    exemption may move them. ``net::ERR_`` is a plausible pattern to write for a
+    third-party beacon, and it appears verbatim in the message about the site
+    itself being unreachable.
     """
 
     text: str
     origin: str | None = None
+    from_page: bool = True
 
 
 @dataclass
@@ -214,6 +223,8 @@ class CheckResult:
     output_errors_total: int
     resource_errors: list[str]
     resource_errors_total: int
+    ignored_errors: list[str]
+    ignored_errors_total: int
     expects: list[ExpectResult]
     failure: str | None
     screenshot: str | None
@@ -226,6 +237,7 @@ def run_check(
     expects: tuple[str, ...] = (),
     screenshot: str | None = None,
     fail_on_resource_error: bool = False,
+    ignore_console: tuple[str, ...] = (),
     progress: Callable[[float], None] | None = None,
 ) -> CheckResult:
     """Load ``url``, wait for the app to render, and return the verdict.
@@ -235,10 +247,25 @@ def run_check(
     either every ``expects`` selector was visible (when given) or at least one
     Shiny output rendered non-empty content (the default). A resource the browser
     could not load is reported but does not fail the check unless
-    ``fail_on_resource_error`` is set. ``screenshot`` is captured only on failure.
-    ``progress`` is called with the elapsed seconds on every poll, for callers
-    reporting a wait.
+    ``fail_on_resource_error`` is set. A console or page error containing one of
+    the ``ignore_console`` substrings is reported separately and does not fail the
+    check either. ``screenshot`` is captured only on failure. ``progress`` is
+    called with the elapsed seconds on every poll, for callers reporting a wait.
+
+    An empty ``ignore_console`` pattern raises ``ValueError``. The CLI refuses one
+    with a hint before it launches a browser; this keeps the same promise for
+    anyone calling ``run_check`` directly, since the alternative is that importing
+    this function is a way around the invariant it exists to hold.
     """
+    if any(not pattern for pattern in ignore_console):
+        # Every string contains the empty one, so accepting it would silently turn
+        # a named exemption into "ignore every console error", and a broken app
+        # would then be reported as healthy rather than as unchecked.
+        raise ValueError(
+            "ignore_console patterns must not be empty; the empty string is in every "
+            "message and would exempt every console error"
+        )
+
     start = time.monotonic()
     said: list[_Said] = []
     # Every request that actually failed, by URL: a load with no response at all
@@ -258,7 +285,7 @@ def run_check(
     ) -> CheckResult:
         state = expect_state or dict.fromkeys(expects, False)
         page_errors = output_errors or []
-        app_errors, resource_errors = _partition(said, failed_loads)
+        app_errors, resource_errors, ignored_errors = _partition(said, failed_loads, ignore_console)
         return CheckResult(
             ok=ok,
             url=url,
@@ -271,6 +298,8 @@ def run_check(
             output_errors_total=len(page_errors),
             resource_errors=_bounded(resource_errors),
             resource_errors_total=len(resource_errors),
+            ignored_errors=_bounded(ignored_errors),
+            ignored_errors_total=len(ignored_errors),
             expects=[ExpectResult(sel, done) for sel, done in state.items()],
             failure=failure,
             screenshot=shot,
@@ -310,10 +339,10 @@ def run_check(
                     url, wait_until="domcontentloaded", timeout=_remaining_millis(deadline)
                 )
             except PlaywrightError as err:
-                said.append(_Said(str(err)))
+                said.append(_Said(str(err), from_page=False))
                 return result(ok=False, failure="navigation", shot=_shoot(page, screenshot))
             if response is not None and response.status >= 400:
-                said.append(_Said(f"HTTP {response.status} for {url}"))
+                said.append(_Said(f"HTTP {response.status} for {url}", from_page=False))
                 return result(ok=False, failure="http-status", shot=_shoot(page, screenshot))
 
             expect_state = dict.fromkeys(expects, False)
@@ -323,7 +352,9 @@ def run_check(
                 answering = _answering(page, deadline)
                 scan = _scan_frames(answering)
                 _scan_expects(answering, expect_state)
-                failure = _fault(said, failed_loads, scan, strict=fail_on_resource_error)
+                failure = _fault(
+                    said, failed_loads, scan, strict=fail_on_resource_error, ignore=ignore_console
+                )
 
                 if failure is None and _satisfied(scan, expect_state, expects):
                     # Let the page settle briefly: a failure right after the first
@@ -335,7 +366,13 @@ def run_check(
                     answering = _answering(page, deadline)
                     scan = _scan_frames(answering)
                     _scan_expects(answering, expect_state)
-                    failure = _fault(said, failed_loads, scan, strict=fail_on_resource_error)
+                    failure = _fault(
+                        said,
+                        failed_loads,
+                        scan,
+                        strict=fail_on_resource_error,
+                        ignore=ignore_console,
+                    )
                     if failure is None and not _satisfied(scan, expect_state, expects):
                         # It held, then stopped holding. That is not a pass, and it
                         # is not yet a failure either: the app may simply be
@@ -388,8 +425,10 @@ def _remaining_millis(deadline: float) -> int:
     return max(1, int((deadline - time.monotonic()) * 1000))
 
 
-def _partition(said: list[_Said], failed_loads: set[str]) -> tuple[list[str], list[str]]:
-    """Split what the page said into the app's own errors and its failed loads.
+def _partition(
+    said: list[_Said], failed_loads: set[str], ignore: tuple[str, ...] = ()
+) -> tuple[list[str], list[str], list[str]]:
+    """Split what the page said into the app's own errors, failed loads, and exemptions.
 
     Matched by URL when a verdict is wanted rather than as each message arrives,
     so a network event landing between the console error and that verdict is
@@ -406,16 +445,37 @@ def _partition(said: list[_Said], failed_loads: set[str]) -> tuple[list[str], li
     the same shape, no console arguments and located at a URL, and no network
     event ever arrives to explain it, which is correct: the browser refused
     something in the page rather than failing to fetch it.
+
+    ``ignore`` is read only against what the page itself said, and only against
+    what is left after that split. A pattern written for the app's own words
+    cannot reach a failed load: those have their own switch, and the message they
+    carry is the browser's wording rather than the app's. Nor can it reach the
+    check's own account of a navigation failure or an error status, which is not
+    a console error and is never ignored, since it is what ended the check. The
+    match is a plain case-sensitive substring, so what is exempted is legible
+    from the command line that exempted it.
     """
     app: list[str] = []
     resource: list[str] = []
+    ignored: list[str] = []
     for item in said:
-        target = resource if item.origin is not None and item.origin in failed_loads else app
-        target.append(item.text)
-    return app, resource
+        if item.origin is not None and item.origin in failed_loads:
+            resource.append(item.text)
+        elif item.from_page and any(pattern in item.text for pattern in ignore):
+            ignored.append(item.text)
+        else:
+            app.append(item.text)
+    return app, resource, ignored
 
 
-def _fault(said: list[_Said], failed_loads: set[str], scan: _Scan, *, strict: bool) -> str | None:
+def _fault(
+    said: list[_Said],
+    failed_loads: set[str],
+    scan: _Scan,
+    *,
+    strict: bool,
+    ignore: tuple[str, ...] = (),
+) -> str | None:
     """The failure the page is already showing, if any, in order of directness.
 
     An error the app raised says more about what is wrong than an output in an
@@ -423,8 +483,12 @@ def _fault(said: list[_Said], failed_loads: set[str], scan: _Scan, *, strict: bo
     load only decides the verdict under ``strict``: a missing sourcemap, webfont
     or image is not the app being broken, and failing on one teaches a team to
     ignore the check.
+
+    A message matching ``ignore`` decides nothing, which is the whole of what the
+    flag does: it is still counted and still reported, and an output in an error
+    state or a failed load under ``strict`` still fails the check around it.
     """
-    app_errors, resource_errors = _partition(said, failed_loads)
+    app_errors, resource_errors, _ = _partition(said, failed_loads, ignore)
     if app_errors:
         return "error"
     if scan.output_errors:

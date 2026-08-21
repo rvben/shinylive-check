@@ -79,6 +79,21 @@ _VERDICT_FIELDS = [
         "description": "Failed resource loads, which may exceed len(resource_errors)",
     },
     {
+        "name": "ignored_errors",
+        "type": "array",
+        "items": {"type": "string"},
+        "description": (
+            "Console and page errors a --ignore-console pattern matched, truncated "
+            "and clipped like errors. Reported but never a failure; use "
+            "ignored_errors_total for the count"
+        ),
+    },
+    {
+        "name": "ignored_errors_total",
+        "type": "integer",
+        "description": "Errors exempted by --ignore-console, which may exceed len(ignored_errors)",
+    },
+    {
         "name": "expects",
         "type": "array",
         "items": {
@@ -175,6 +190,16 @@ SCHEMA = {
                         "Fail the check when the browser could not load a resource. "
                         "Failed loads are reported either way; by default they do not "
                         "decide the verdict, since a missing asset is not a broken app"
+                    ),
+                },
+                {
+                    "name": "--ignore-console",
+                    "type": "string[]",
+                    "description": (
+                        "Do not fail on a console or page error containing this text; "
+                        "repeatable, matched as a case-sensitive substring. Matched "
+                        "errors move to ignored_errors and are reported either way. An "
+                        "empty pattern is a usage error, since it would match everything"
                     ),
                 },
                 {

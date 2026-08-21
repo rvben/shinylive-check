@@ -34,6 +34,7 @@ def verdict(**overrides: Any) -> CheckResult:
         "errors": [],
         "output_errors": [],
         "resource_errors": [],
+        "ignored_errors": [],
         "expects": [],
         "failure": None,
         "screenshot": None,
@@ -44,6 +45,7 @@ def verdict(**overrides: Any) -> CheckResult:
     fields.setdefault("errors_total", len(fields["errors"]))
     fields.setdefault("output_errors_total", len(fields["output_errors"]))
     fields.setdefault("resource_errors_total", len(fields["resource_errors"]))
+    fields.setdefault("ignored_errors_total", len(fields["ignored_errors"]))
     # A rendered output is itself proof the runtime ran, so the default is derived
     # rather than fixed: a verdict built here is never internally contradictory.
     fields.setdefault("shiny_detected", fields["outputs"] > 0)
@@ -110,6 +112,41 @@ def test_a_timeout_that_did_see_the_runtime_does_not_blame_it():
         verdict(failure="timeout", shiny_detected=True, expects=[ExpectResult("#late", False)])
     )
     assert "no Shiny runtime detected" not in text
+
+
+def test_an_ignored_console_error_is_shown_on_a_pass():
+    """Ignored must not mean hidden, on the same terms a failed load gets.
+
+    `--ignore-console` is how a team gets past one message it has decided about.
+    A check that then prints nothing turns that decision into an invisible one: the
+    message can change, the app can start printing it for a new reason, and the
+    only line saying anything was set aside is in a CI config nobody rereads. The
+    flag that produced the exemption is named here for the same reason.
+    """
+    text = render_text(verdict(ok=True, outputs=1, ignored_errors=["ResizeObserver loop"]))
+    assert text.startswith("OK:")
+    assert "ResizeObserver loop" in text
+    assert "--ignore-console" in text
+
+
+def test_ignored_console_errors_are_shown_beside_the_ones_that_failed():
+    """One exemption does not make the next error quieter."""
+    text = render_text(
+        verdict(failure="error", errors=["real boom"], ignored_errors=["known noise"])
+    )
+    assert text.splitlines()[0].startswith("FAIL (error): 1 console/page error(s) at")
+    assert "real boom" in text
+    assert "known noise" in text
+
+
+def test_the_ignored_count_is_what_occurred_not_what_is_listed():
+    """The same clipping the other lists get, counted the same way.
+
+    A page that prints an ignored message in a loop has its list clipped, and a
+    count read off the clipped list would understate it with a plausible number.
+    """
+    text = render_text(verdict(ok=True, outputs=1, ignored_errors=["one"], ignored_errors_total=9))
+    assert "9 console errors ignored" in text
 
 
 def test_a_navigation_failure_says_the_page_would_not_load():
