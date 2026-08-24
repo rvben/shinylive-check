@@ -196,6 +196,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now truncated at 10,000 encoded bytes and the lists clipped to the earliest 50,
   each with a marker naming what was dropped, which bounds the verdict at roughly
   500 KB whatever the page says and in whatever alphabet.
+- The checked page could also choose this tool's memory and its share of the
+  timeout, because bounding the verdict bounded only what was printed. Every
+  message was held whole so that it could be counted, and every character of every
+  message was classified as it arrived to decide what was safe to print. A page
+  erroring in a render loop was measured at 91,801 messages and 1,809 MB resident,
+  and one 50 MB console error took 18.1 s and 492 MB to sanitise on its own, apart
+  from the browser, out of a budget the caller had set for the app to boot. A
+  message is now cut as it arrives, at most 500 are kept with their text and the
+  rest are counted, and the per-character reading waits for the
+  verdict, where it runs over the fifty items that are printed: the same 50 MB
+  message now costs 0.01 s and no measurable allocation, and produces the identical
+  text. A frame's scan is bounded in the page for the same reason, since it runs
+  twice a second and an app decides both how many of its outputs fail and how much
+  each one says, and one budget is spent across a whole sweep rather than handed
+  to each frame, since a page picks how many frames it holds as well: 21 frames at
+  the per-frame ceiling cost a single sweep 6.9 s and 116 MB to keep the 500 items
+  one frame already yields, against 0.5 s and 30.7 MB now. The scan cuts and
+  counts with methods taken before the page runs, since everything it is built
+  from otherwise belongs to the page and a bound kept with a method the page
+  supplies is a bound the page sets: replacing `String.prototype.slice` alone
+  took ten failed outputs from 3.8 s and 1117 MB to 12.0 s and 3183 MB, and now
+  costs the page nothing. No bound here decides anything about the page: every
+  `_total` still reports what actually occurred; a truncated message still names
+  its size, as "at most N" where the only count available is the page's own in
+  UTF-16 code units, which a verdict is not read in and in which 40,000 emoji
+  come to 80,000; once the failed-load set stops accepting URLs, a console
+  message shaped like a failed load is read as one rather than promoted to the
+  app's own error on the strength of a lookup that can no longer answer; and a
+  message counted rather than kept is sorted into its total at the verdict just
+  as a kept one is, against every failed load known by then, so which total it
+  joins does not turn on whether it was one of the messages there was room for.
+  A share of that cap is held for the app's own errors, so that a page failing
+  hundreds of loads cannot spend it all before the app raises the one error
+  saying why, and a console message that only might be one of those loads draws
+  on a share of its own instead: a flood whose network events trail its console
+  messages would otherwise leave the verdict naming a failure without naming its
+  cause. What remains of a flood's cost is the browser driver's rather than this
+  tool's, since it retains every console message for the life of the page:
+  measured with this check keeping nothing at all, the same flood still reached a
+  gigabyte resident.
 
 ## [0.1.0] - 2026-08-20
 

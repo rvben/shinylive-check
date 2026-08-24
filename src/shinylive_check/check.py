@@ -10,6 +10,7 @@ errors, and the Shiny output elements inside the app frame.
 
 from __future__ import annotations
 
+import hashlib
 import time
 import unicodedata
 from collections.abc import Callable
@@ -37,22 +38,90 @@ class SelectorError(ValueError):
 # JavaScript, so none of the three can appear in the static shell an export serves
 # before pyodide boots: they separate a booting app from a dead one, which nothing
 # in the shell's own HTML can do.
-_FRAME_SCAN = """
-() => {
+#
+# What comes back is bounded in the page, not after it arrives: an app can hold
+# any number of failed outputs carrying any amount of text, and every character of
+# that would otherwise cross the browser connection and be held here to report
+# fifty of them. Each error that is cut is handed over with the length it was cut
+# from, since this side can no longer measure what it was never sent, and one that
+# is not cut is handed over with no length at all: a length reported for text that
+# arrived whole would be describing a cut that never happened.
+#
+# That length is in UTF-16 code units, which a verdict is not read in. A Python
+# string is measured in code points, so 40,000 emoji are 80,000 units and a reader
+# was told the message ran to twice what anyone had written. Counting the code
+# points here instead means walking the whole string, which is the cost this bound
+# exists to avoid: 200.1 ms against 1.4 ms on 50 MB, paid on text the page chose
+# the length of. Asking whether the two counts differ is free, because a surrogate
+# pair is the only thing that makes them differ and one regex answers it without
+# allocating, early-exiting on the first pair. So the length travels with whether
+# it is a character count, and is reported as a bound when it is not one.
+#
+# The answer is the page's account either way, as the length always was. A page
+# that lies about either buys itself a wrong number beside its own error, which is
+# not worth the walk.
+#
+# How many is asked for rather than fixed here, because the page chooses how many
+# frames it holds as well as what each one says: a ceiling written into the script
+# is one every frame is given, and the sweep pays their sum. The caller passes
+# what the frames before this one left.
+_FRAME_SCAN_TEMPLATE = """
+(kept) => {
   const outs = Array.from(document.querySelectorAll(".shiny-bound-output"));
   const rendered = outs.filter(
     (el) => !el.classList.contains("shiny-output-error") && el.innerHTML.trim().length > 0
   ).length;
+  // The two bounds this script keeps are the length of each error and the number
+  // of them, and both are kept with methods the page could otherwise replace: an
+  // overridden `push` appends as many times as it likes after the room has been
+  // checked, and an overridden `slice` hands back the whole string it was asked
+  // to cut. `_FRAME_SCAN_INIT` takes them before the page runs and puts them out
+  // of its reach. Appending through `defineProperty` also settles a setter on
+  // `Array.prototype`, which an indexed assignment would consult and which can
+  // grow the very array it intercepts.
+  //
+  // Both are CALLED rather than reached through: a call consults no property, so
+  // there is nothing on the way to the method for the page to own. Reaching one
+  // through a property leaves the capture worth nothing, since a captured
+  // function is an ordinary mutable object and holding a reference to it is not
+  // holding its `call`, which the page may give it an own copy of; the cut is
+  // therefore bound to its argument while the page has not yet run.
+  //
+  // The fallback is what this script did before the capture existed, and is
+  // reachable only if the init script did not run, which is not something a page
+  // can arrange. It is here so that a frame the capture never reached is still
+  // swept, rather than throwing and being skipped in silence.
+  const safe = window.%(safe)s || {
+    cut: Function.prototype.call.bind(String.prototype.slice),
+    define: Object.defineProperty,
+    paired: (text) => /[\\uD800-\\uDBFF]/.test(text),
+  };
   const errors = [];
+  const keep = (value) => {
+    safe.define(errors, errors.length, {
+      value: value, writable: true, enumerable: true, configurable: true,
+    });
+  };
+  let errorTotal = 0;
   for (const el of document.querySelectorAll(".shiny-output-error")) {
     const text = (el.textContent || "").trim();
-    if (text) errors.push(text);
+    if (!text) continue;
+    errorTotal += 1;
+    if (errors.length < kept) {
+      const oversize = text.length > %(chars)d;
+      keep({
+        text: safe.cut(text, 0, %(chars)d),
+        length: oversize ? text.length : null,
+        exact: !oversize || !safe.paired(text),
+      });
+    }
   }
   return {
     bound: outs.length,
     inputs: document.querySelectorAll(".shiny-bound-input").length,
     rendered,
     errors,
+    errorTotal,
     runtime: typeof window.Shiny !== "undefined",
   };
 }
@@ -99,6 +168,107 @@ _MAX_REPORTED_BYTES = 10_000
 # errors are kept because a cascade's root cause is at its start.
 _MAX_REPORTED_ITEMS = 50
 
+# How much of one message is kept at all, and so how much of it is ever read.
+# Cutting it takes one slice; deciding what survives takes a category lookup per
+# character, which is why the cut happens as the message arrives and the deciding
+# waits for the verdict. Reading a 50 MB console.error whole cost 2743 MB and
+# seconds of a budget the caller set for the app to boot.
+#
+# Twice the reported ceiling. A character that survives costs at least one byte of
+# that ceiling, so ordinary text reaches it first and the slack is there for text
+# with control characters through it; a page reaching this bound is padding with
+# characters that are stripped, which buys it no more of the verdict than it would
+# have had.
+_MAX_SCANNED_CHARS = 20_000
+
+# How many messages are kept with their text, against the fifty a verdict prints.
+# The margin is what keeps the classification in `_partition` deferred to the
+# verdict for any page that is merely noisy; past it a message is classified as it
+# arrives and counted rather than kept, so the totals stay exact while the memory
+# stops following the page's lead.
+_MAX_RETAINED_ITEMS = 500
+
+# How many failed loads are remembered, so that a console error can be recognised
+# as one. At sixteen bytes a load this is about 22 MB held, against the 1,066 MB
+# the browser spent to fail 50,000 of them; the bound is here because memory has
+# to be bounded by something this check promises rather than by what a browser
+# happens to cost today.
+#
+# Past it the check can no longer tell the browser's report of a failed load from
+# the app's own error, and says the failed load, which is what an unbounded set
+# would have said: what fills this is failed loads, so what arrives past it is
+# overwhelmingly one of them. Reading them as the app's instead makes the bound
+# decide the verdict, failing a check that asked not to fail on failed loads and
+# printing the browser's sentence about a 404 as the app's diagnosis. Nothing is
+# hidden either way, since a failed load is still counted, still listed, and still
+# fails the check for a caller who asked about failed loads.
+_MAX_TRACKED_LOADS = 250_000
+
+# How much of a URL is used to remember it by. A URL is text the page chose the
+# length of, like any other, and a rejected request carries whatever it asked for.
+# Applied on both sides of the match, so it changes no comparison unless two URLs
+# agree for two thousand characters and differ after.
+_MAX_URL_CHARS = 2_048
+
+# Where the captured methods are kept. Non-writable and non-configurable, so the
+# page cannot put its own object there, and non-enumerable so that a page walking
+# `window` is not handed the name.
+_SAFE_BUILTINS = "__shinylive_check_safe__"
+
+# Run in every frame of the page before anything the page ships, which is what
+# makes the three methods it takes the real ones. Everything the scan is built
+# from belongs to the page, and a bound kept with a method the page supplies is a
+# bound the page sets: replacing `slice` alone took the same ten failed outputs
+# from 3.8 s and 1117 MB to 12.0 s and 3183 MB, reproducing through the cut the
+# cost the cut was added to remove. What each override is worth multiplies by the
+# number of errors kept, which is another thing the page picks.
+#
+# Only the methods that decide what crosses the connection are taken: the two the
+# bounds are kept with, and the one that says whether a reported size is a size.
+# The rest of what the scan touches costs the page its own time and nothing here,
+# and is bounded by the sweep's responsiveness deadline instead.
+#
+# Each is bound to its argument here rather than reached for later, so that the
+# scan calls it instead of looking it up. Freezing this object freezes the
+# references and not the functions they name, and a function is an ordinary object
+# whose `call` the page may give it an own copy of; every property on the way to
+# the method is therefore read here, while the page has not yet run, and what is
+# stored can only be called. Reached through its `call` instead, the captured
+# method leaves the page the whole of what it had before it was captured: 3.8 s
+# and 1117 MB became 13.5 s and 3188 MB on the same ten outputs, against a page
+# whose `slice` was untouched.
+#
+# `test` is the one capture that is not enough on its own, because it does not do
+# the matching: it looks `exec` up on the regex it was handed and calls that, so a
+# page owning `RegExp.prototype.exec` answers every question this asks. The regex
+# is built here and given its own `exec` that cannot be replaced, which is the
+# same defence one level down. The regex object itself is reachable from nowhere
+# but the bound function, which does not hand it back.
+_FRAME_SCAN_INIT_TEMPLATE = """
+(() => {
+  const cut = Function.prototype.call.bind(String.prototype.slice);
+  const define = Object.defineProperty;
+  const pairs = /[\\uD800-\\uDBFF]/;
+  define(pairs, "exec", {
+    value: RegExp.prototype.exec,
+    writable: false,
+    enumerable: false,
+    configurable: false,
+  });
+  const paired = Function.prototype.call.bind(RegExp.prototype.test, pairs);
+  if (window.%(safe)s) return;
+  define(window, "%(safe)s", {
+    value: Object.freeze({ cut: cut, define: define, paired: paired }),
+    writable: false,
+    enumerable: false,
+    configurable: false,
+  });
+})();
+"""
+
+_FRAME_SCAN_INIT = _FRAME_SCAN_INIT_TEMPLATE % {"safe": _SAFE_BUILTINS}
+_FRAME_SCAN = _FRAME_SCAN_TEMPLATE % {"chars": _MAX_SCANNED_CHARS, "safe": _SAFE_BUILTINS}
+
 
 def _json_cost(char: str) -> int:
     """Bytes this character costs once JSON-encoded, ASCII-safe.
@@ -121,7 +291,7 @@ def _json_cost(char: str) -> int:
     return 1
 
 
-def _printable(text: str) -> str:
+def _printable(text: str, written: int | None = None, *, exact: bool = True) -> str:
     """Strip control characters from text the checked page chose, and bound it.
 
     Console messages and page errors are written by the page, and the verdict
@@ -135,33 +305,80 @@ def _printable(text: str) -> str:
     console.error would otherwise choose the size of this tool's stdout, and the
     verdict is what a CI job stores and a script parses. The budget is spent in
     encoded bytes, so the ceiling does not depend on the alphabet the page picked.
-    The reported size is the size before truncation, so a clipped error is never
-    read as a short one.
+
+    Reading is bounded as well as reporting, in one pass that stops at whichever
+    ceiling comes first, because deciding what survives costs a category lookup
+    per character: stripping a 50 MB console.error whole spent seconds of the
+    caller's boot budget and 2.7 GB of memory to produce ten kilobytes of verdict.
+    Messages normally arrive here already cut to that length, and this repeats the
+    cut rather than trusting it, since one caller's oversight would otherwise be
+    the whole of the bound.
+
+    ``written`` is how long the message was where it was written, for text that
+    was cut short before it got here. The reported size is always that size rather
+    than what arrived, so a clipped error is never read as a short one.
+
+    ``exact`` is false when that size was counted in UTF-16 code units over text
+    holding a surrogate pair, which is how a page counts and not how this reads: it
+    is then an upper bound on the characters rather than a count of them, and says
+    so. Reporting it as a count told a reader a 40,000 character error ran to
+    80,000; reporting nothing would throw away the magnitude, which is the part
+    worth having.
     """
-    clean = "".join(
-        char
-        for char in text
-        if char in _KEEP_CONTROLS or unicodedata.category(char) not in _STEERING_CATEGORIES
-    )
+    size = len(text) if written is None else written
+    kept: list[str] = []
     spent = 0
-    for index, char in enumerate(clean):
+    clipped = size > len(text) or len(text) > _MAX_SCANNED_CHARS
+    for char in text[:_MAX_SCANNED_CHARS]:
+        if char not in _KEEP_CONTROLS and unicodedata.category(char) in _STEERING_CATEGORIES:
+            continue
         spent += _json_cost(char)
         if spent > _MAX_REPORTED_BYTES:
-            return f"{clean[:index]}... [truncated, {len(clean)} characters total]"
+            clipped = True
+            break
+        kept.append(char)
+    clean = "".join(kept)
+    if clipped:
+        bound = "" if exact else "at most "
+        return f"{clean}... [truncated, {bound}{size} characters total]"
     return clean
 
 
-def _bounded(items: list[str]) -> list[str]:
-    """Sanitize a page-controlled list, keeping its head and naming what was cut.
+@dataclass
+class _Bucket:
+    """Messages of one kind, and how many of that kind there were.
+
+    The two travel together because they diverge: the verdict reports the earliest
+    of them and a flooding page is counted without being kept, so the length of
+    ``items`` answers a question nobody asked. Every field of the verdict that
+    holds page-controlled text is rendered from one of these, which is what makes
+    the ``_total`` companions exact by construction rather than by remembering.
+    """
+
+    items: list[_Said]
+    total: int
+
+
+def _bounded(bucket: _Bucket) -> list[str]:
+    """Render a bucket, keeping its head and naming what was cut.
 
     The companion count (``errors_total``) is what keeps this honest: a reader
     must never mistake the length of a clipped list for the number of things that
-    actually went wrong.
+    actually went wrong. That count is the bucket's own rather than the length of
+    what it carries, because a message can be counted without being kept.
+
+    Sanitising happens here rather than when a message arrives, and is the reason
+    the two are separable at all: it is a category lookup per character, so paying
+    it on everything a flooding page says is paying it on ninety thousand messages
+    to print fifty. What arrives is cut to a length instead, which is one slice.
     """
-    kept = [_printable(item) for item in items[:_MAX_REPORTED_ITEMS]]
-    dropped = len(items) - len(kept)
-    if dropped:
-        kept.append(f"... [{dropped} further omitted, {len(items)} total]")
+    kept = [
+        _printable(item.text, item.written, exact=item.exact)
+        for item in bucket.items[:_MAX_REPORTED_ITEMS]
+    ]
+    dropped = bucket.total - len(kept)
+    if dropped > 0:
+        kept.append(f"... [{dropped} further omitted, {bucket.total} total]")
     return kept
 
 
@@ -171,12 +388,31 @@ class ExpectResult:
     satisfied: bool
 
 
+def _load_key(url: str) -> bytes:
+    """How a failed load is remembered, and how a console error is matched to one.
+
+    A digest rather than the URL, because a URL is text the page chose the length
+    of, like any other: a request carries whatever it asked for, and a rejected one
+    is remembered here. Sixteen bytes each instead of up to two thousand cost
+    100,000 failed loads 8.7 MB where the URLs cost 203 MB, and the page no longer
+    picks which. What is stored is never read back, only compared, so nothing is
+    lost by storing something unreadable.
+
+    Truncated before hashing, so a page cannot make one entry cost more by asking
+    for a longer URL. Applied to both sides of the match, so it changes no
+    comparison unless two URLs agree for two thousand characters and differ after.
+    """
+    return hashlib.blake2b(
+        url[:_MAX_URL_CHARS].encode("utf-8", "surrogatepass"), digest_size=16
+    ).digest()
+
+
 @dataclass
 class _Said:
     """One message about the page, with where the browser located it.
 
-    ``origin`` is the URL a console error was located at, and is set only when the
-    error carried no console arguments. That pair is the shape Chromium
+    ``origin`` is a digest of the URL a console error was located at, and is set
+    only when the error carried no console arguments. That pair is the shape Chromium
     synthesises for a load it could not complete: no arguments, located at the
     resource rather than in the page's own script. Anything the app printed itself
     carries what console.error was called with, so the two never collide.
@@ -191,11 +427,147 @@ class _Said:
     exemption may move them. ``net::ERR_`` is a plausible pattern to write for a
     third-party beacon, and it appears verbatim in the message about the site
     itself being unreachable.
+
+    ``text`` is as much of the message as is kept and ``written`` is how long it
+    was when the page wrote it, so a message cut short still reports the size it
+    really was. ``exact`` is whether that size is a count of characters: it is
+    false only for a page's account of text it cut, counted in the code units a
+    surrogate pair takes two of, and it makes the size read as the bound it is.
+
+    ``exempt`` is whether an ``--ignore-console`` pattern was in the message, and
+    is decided when the message arrives rather than at the verdict, because
+    ``text`` by then is only the head of it: a pattern the caller named must still
+    reach a message that was too long to keep whole. Deciding it early costs
+    nothing that the URL match's slack costs, since it depends on the text and the
+    patterns and neither changes afterwards.
     """
 
     text: str
-    origin: str | None = None
+    written: int
+    origin: bytes | None = None
     from_page: bool = True
+    exempt: bool = False
+    exact: bool = True
+
+
+class _Heard:
+    """Everything the page has said, and every load that failed under it.
+
+    Both are lists a page writes and this process holds, so both are bounded here
+    rather than at the verdict: clipping what is printed leaves what is kept
+    following the page's lead, which is how a render loop's 91801 console errors
+    became 1809 MB resident and 23.6 s spent against a 10 s budget.
+
+    Past the retention cap a message is counted instead of kept, so what a reader
+    is told to trust - the ``_total`` beside each list - stays exactly what
+    occurred while the memory stops following the page's lead. Which total it
+    joins is still decided at the verdict, like the kept ones: dropping the text
+    is what the cap is for, and dropping the second reading with it would let the
+    cap decide which check fails.
+
+    The cap is shared, but each answer a message can arrive with holds a reserve
+    of it that the others cannot spend, because the kinds do not arrive evenly: a
+    broken export fails hundreds of loads while the app raises the one error saying
+    why, and one budget spent in arrival order is spent on the loads. The reserve
+    is as large as the verdict prints, so no kind can be starved of anything a
+    reader would have been shown. A located message no failed load explains yet
+    draws on a reserve of its own rather than the app's, since a flood whose
+    network events trail its console messages reads as the app's own on the way in
+    and would otherwise spend the share held for the one error worth reading.
+
+    What a message costs on the way in is a slice, a substring search and a set
+    lookup, all of which the interpreter does at C speed. That is the whole reason
+    the bound holds under a flood: anything per-character here is paid ninety
+    thousand times, and the check's budget is spent on it while the app is still
+    trying to boot.
+    """
+
+    def __init__(self, ignore: tuple[str, ...] = ()) -> None:
+        self._ignore = ignore
+        self._kept: list[_Said] = []
+        # How much of the shared cap each reserve has drawn. Keyed by the answer a
+        # message ARRIVED with, which includes "pending" for a located message no
+        # failed load explains yet, because that one may still join either of two
+        # lists and a reserve it spends is a reserve the list it leaves cannot get
+        # back. Migrating the count when the load fails would be exact and would
+        # also let a page refill the app's reserve on demand, one failed URL at a
+        # time, until nothing bounds what is kept.
+        self._held = {"app": 0, "resource": 0, "ignored": 0, "pending": 0}
+        self._counted = {"app": 0, "resource": 0, "ignored": 0}
+        # Every request that actually failed, by URL: a load with no response at
+        # all (a refused connection, a dead host) and a response that carried an
+        # error status are both failed loads, and only one of them produces a
+        # response.
+        self._failed: set[bytes] = set()
+        # Whether the set above is all of them. Once it is not, a URL missing from
+        # it no longer means the load did not fail, so the match it backs stops
+        # being evidence and every classification that would have leant on it is
+        # decided the other way.
+        self._loads_complete = True
+        # Messages counted rather than kept whose kind is not settled yet, by the
+        # URL and the exemption that will settle it. A located message reads as
+        # the app's own until a failed load explains it, and the two arrive in
+        # whichever order the driver hands them over, so the kept messages are
+        # read again at the verdict against every load known by then. Tallying
+        # this one under the kind it arrived with would make its provisional
+        # answer final, and the answer that gets frozen is the one that fails a
+        # check. What is remembered is the URL, at 146 bytes; the text is what
+        # was expensive, and the text is still dropped.
+        self._unsettled: dict[tuple[bytes, bool], int] = {}
+
+    def load_failed(self, url: str) -> None:
+        key = _load_key(url)
+        if len(self._failed) < _MAX_TRACKED_LOADS:
+            self._failed.add(key)
+        elif key not in self._failed:
+            # One already remembered costs nothing to drop, and a page failing the
+            # same load repeatedly is the ordinary shape of a retry loop.
+            self._loads_complete = False
+
+    def said(self, text: str, origin: str | None = None, *, from_page: bool = True) -> None:
+        key = None if origin is None else _load_key(origin)
+        exempt = from_page and any(pattern in text for pattern in self._ignore)
+        # Classified against what is known now rather than at the verdict, because
+        # the decision it drives has to be made now: a console error whose network
+        # event has not arrived yet reads as the app's own, which is the stricter
+        # reading. It decides only which reserve this message draws on. Nothing
+        # here is a verdict, since a kept message is partitioned again at the
+        # verdict and a counted one is settled there too, against every failed load
+        # known by then.
+        kind = _kind(key, exempt, self._failed, loads_complete=self._loads_complete)
+        # What is still owed an answer, or None once this message has one for good.
+        # A message the page located nowhere is the app's own or an exemption for
+        # good, and one already matched to a failed load cannot become anything
+        # else, since the set it matched in only grows. Everything else is one
+        # network event away from a different answer.
+        pending = None if key is None or kind == "resource" else (key, exempt)
+        reserve = kind if pending is None else "pending"
+        if len(self._kept) < _MAX_RETAINED_ITEMS or self._held[reserve] < _MAX_REPORTED_ITEMS:
+            self._held[reserve] += 1
+            self._kept.append(_Said(text[:_MAX_SCANNED_CHARS], len(text), key, from_page, exempt))
+        elif pending is None:
+            self._counted[kind] += 1
+        elif pending in self._unsettled or len(self._unsettled) < _MAX_TRACKED_LOADS:
+            self._unsettled[pending] = self._unsettled.get(pending, 0) + 1
+        else:
+            # The same bound as the failed loads, and the same way out of it: what
+            # cannot be settled is read as the load it is shaped like rather than
+            # promoted to the app's own error.
+            self._counted["resource"] += 1
+
+    def buckets(self) -> tuple[_Bucket, _Bucket, _Bucket]:
+        """The app's own errors, the failed loads, and the exemptions."""
+        app, resource, ignored = _partition(
+            self._kept, self._failed, loads_complete=self._loads_complete
+        )
+        counted = dict(self._counted)
+        for (key, exempt), times in self._unsettled.items():
+            counted[_kind(key, exempt, self._failed, loads_complete=self._loads_complete)] += times
+        return (
+            _Bucket(app, len(app) + counted["app"]),
+            _Bucket(resource, len(resource) + counted["resource"]),
+            _Bucket(ignored, len(ignored) + counted["ignored"]),
+        )
 
 
 @dataclass
@@ -203,7 +575,7 @@ class _Scan:
     """What one sweep of every frame saw."""
 
     outputs: int
-    output_errors: list[str]
+    output_errors: _Bucket
     # window.Shiny, a bound input or a bound output: any one of them is the runtime
     # having executed, and none of them can come from the static shell.
     shiny_detected: bool
@@ -267,25 +639,21 @@ def run_check(
         )
 
     start = time.monotonic()
-    said: list[_Said] = []
-    # Every request that actually failed, by URL: a load with no response at all
-    # (a refused connection, a dead host) and a response that carried an error
-    # status are both failed loads, and only one of them produces a response.
-    failed_loads: set[str] = set()
+    heard = _Heard(ignore_console)
 
     def result(
         *,
         ok: bool,
         outputs: int = 0,
         shiny_detected: bool = False,
-        output_errors: list[str] | None = None,
+        output_errors: _Bucket | None = None,
         expect_state: dict[str, bool] | None = None,
         failure: str | None = None,
         shot: str | None = None,
     ) -> CheckResult:
         state = expect_state or dict.fromkeys(expects, False)
-        page_errors = output_errors or []
-        app_errors, resource_errors, ignored_errors = _partition(said, failed_loads, ignore_console)
+        page_errors = output_errors or _Bucket([], 0)
+        app_errors, resource_errors, ignored_errors = heard.buckets()
         return CheckResult(
             ok=ok,
             url=url,
@@ -293,13 +661,13 @@ def run_check(
             outputs=outputs,
             shiny_detected=shiny_detected,
             errors=_bounded(app_errors),
-            errors_total=len(app_errors),
+            errors_total=app_errors.total,
             output_errors=_bounded(page_errors),
-            output_errors_total=len(page_errors),
+            output_errors_total=page_errors.total,
             resource_errors=_bounded(resource_errors),
-            resource_errors_total=len(resource_errors),
+            resource_errors_total=resource_errors.total,
             ignored_errors=_bounded(ignored_errors),
-            ignored_errors_total=len(ignored_errors),
+            ignored_errors_total=ignored_errors.total,
             expects=[ExpectResult(sel, done) for sel, done in state.items()],
             failure=failure,
             screenshot=shot,
@@ -316,19 +684,22 @@ def run_check(
         interrupted = False
         try:
             page = browser.new_page()
+            # Before the first navigation, so that every document this page loads
+            # is entered with the scan's two methods already taken.
+            page.add_init_script(_FRAME_SCAN_INIT)
 
             def on_console(msg: ConsoleMessage) -> None:
                 if msg.type != "error":
                     return
-                said.append(_Said(msg.text, None if msg.args else msg.location.get("url")))
+                heard.said(msg.text, None if msg.args else msg.location.get("url"))
 
             def on_response(response: Response) -> None:
                 if response.status >= 400:
-                    failed_loads.add(response.url)
+                    heard.load_failed(response.url)
 
-            page.on("pageerror", lambda err: said.append(_Said(f"pageerror: {err}")))
+            page.on("pageerror", lambda err: heard.said(f"pageerror: {err}"))
             page.on("console", on_console)
-            page.on("requestfailed", lambda request: failed_loads.add(request.url))
+            page.on("requestfailed", lambda request: heard.load_failed(request.url))
             page.on("response", on_response)
 
             _validate_selectors(page, expects)
@@ -339,22 +710,20 @@ def run_check(
                     url, wait_until="domcontentloaded", timeout=_remaining_millis(deadline)
                 )
             except PlaywrightError as err:
-                said.append(_Said(str(err), from_page=False))
+                heard.said(str(err), from_page=False)
                 return result(ok=False, failure="navigation", shot=_shoot(page, screenshot))
             if response is not None and response.status >= 400:
-                said.append(_Said(f"HTTP {response.status} for {url}", from_page=False))
+                heard.said(f"HTTP {response.status} for {url}", from_page=False)
                 return result(ok=False, failure="http-status", shot=_shoot(page, screenshot))
 
             expect_state = dict.fromkeys(expects, False)
-            scan = _Scan(outputs=0, output_errors=[], shiny_detected=False)
+            scan = _Scan(outputs=0, output_errors=_Bucket([], 0), shiny_detected=False)
 
             while True:
                 answering = _answering(page, deadline)
                 scan = _scan_frames(answering)
                 _scan_expects(answering, expect_state)
-                failure = _fault(
-                    said, failed_loads, scan, strict=fail_on_resource_error, ignore=ignore_console
-                )
+                failure = _fault(heard, scan, strict=fail_on_resource_error)
 
                 if failure is None and _satisfied(scan, expect_state, expects):
                     # Let the page settle briefly: a failure right after the first
@@ -366,13 +735,7 @@ def run_check(
                     answering = _answering(page, deadline)
                     scan = _scan_frames(answering)
                     _scan_expects(answering, expect_state)
-                    failure = _fault(
-                        said,
-                        failed_loads,
-                        scan,
-                        strict=fail_on_resource_error,
-                        ignore=ignore_console,
-                    )
+                    failure = _fault(heard, scan, strict=fail_on_resource_error)
                     if failure is None and not _satisfied(scan, expect_state, expects):
                         # It held, then stopped holding. That is not a pass, and it
                         # is not yet a failure either: the app may simply be
@@ -425,9 +788,34 @@ def _remaining_millis(deadline: float) -> int:
     return max(1, int((deadline - time.monotonic()) * 1000))
 
 
+def _kind(
+    origin: bytes | None,
+    exempt: bool,
+    failed_loads: set[bytes],
+    *,
+    loads_complete: bool = True,
+) -> str:
+    """Which of the three lists a message belongs in: app, resource, or ignored.
+
+    One function because it is asked twice: at the verdict for everything kept,
+    and as a message arrives for everything past the retention cap. Two copies of
+    this decision would let the counts disagree with the lists they stand beside.
+
+    ``loads_complete`` is false once the failed-load set stopped accepting URLs.
+    Absence from it then means nothing, so a message shaped like a failed load is
+    read as one rather than promoted to the app's own error on the strength of a
+    lookup that can no longer answer.
+    """
+    if origin is not None and (not loads_complete or origin in failed_loads):
+        return "resource"
+    if exempt:
+        return "ignored"
+    return "app"
+
+
 def _partition(
-    said: list[_Said], failed_loads: set[str], ignore: tuple[str, ...] = ()
-) -> tuple[list[str], list[str], list[str]]:
+    said: list[_Said], failed_loads: set[bytes], *, loads_complete: bool = True
+) -> tuple[list[_Said], list[_Said], list[_Said]]:
     """Split what the page said into the app's own errors, failed loads, and exemptions.
 
     Matched by URL when a verdict is wanted rather than as each message arrives,
@@ -446,7 +834,7 @@ def _partition(
     event ever arrives to explain it, which is correct: the browser refused
     something in the page rather than failing to fetch it.
 
-    ``ignore`` is read only against what the page itself said, and only against
+    An exemption is read only against what the page itself said, and only against
     what is left after that split. A pattern written for the app's own words
     cannot reach a failed load: those have their own switch, and the message they
     carry is the browser's wording rather than the app's. Nor can it reach the
@@ -455,27 +843,14 @@ def _partition(
     match is a plain case-sensitive substring, so what is exempted is legible
     from the command line that exempted it.
     """
-    app: list[str] = []
-    resource: list[str] = []
-    ignored: list[str] = []
+    lists: dict[str, list[_Said]] = {"app": [], "resource": [], "ignored": []}
     for item in said:
-        if item.origin is not None and item.origin in failed_loads:
-            resource.append(item.text)
-        elif item.from_page and any(pattern in item.text for pattern in ignore):
-            ignored.append(item.text)
-        else:
-            app.append(item.text)
-    return app, resource, ignored
+        kind = _kind(item.origin, item.exempt, failed_loads, loads_complete=loads_complete)
+        lists[kind].append(item)
+    return lists["app"], lists["resource"], lists["ignored"]
 
 
-def _fault(
-    said: list[_Said],
-    failed_loads: set[str],
-    scan: _Scan,
-    *,
-    strict: bool,
-    ignore: tuple[str, ...] = (),
-) -> str | None:
+def _fault(heard: _Heard, scan: _Scan, *, strict: bool) -> str | None:
     """The failure the page is already showing, if any, in order of directness.
 
     An error the app raised says more about what is wrong than an output in an
@@ -487,13 +862,17 @@ def _fault(
     A message matching ``ignore`` decides nothing, which is the whole of what the
     flag does: it is still counted and still reported, and an output in an error
     state or a failed load under ``strict`` still fails the check around it.
+
+    Read from the counts rather than from the lists, since a flooding page is
+    counted without being kept and a verdict must not turn on which of its errors
+    were the ones retained.
     """
-    app_errors, resource_errors, _ = _partition(said, failed_loads, ignore)
-    if app_errors:
+    app_errors, resource_errors, _ = heard.buckets()
+    if app_errors.total:
         return "error"
-    if scan.output_errors:
+    if scan.output_errors.total:
         return "output-error"
-    if strict and resource_errors:
+    if strict and resource_errors.total:
         return "resource-error"
     return None
 
@@ -592,19 +971,67 @@ def _sweep_millis(deadline: float) -> int:
 
 
 def _scan_frames(frames: list[Frame]) -> _Scan:
-    """One sweep of every frame that is answering, summed."""
+    """One sweep of every frame that is answering, summed.
+
+    Each frame counts its own failed outputs and hands over only the head of
+    them, so an app rendering thousands of errors is counted in full without its
+    text crossing the browser connection.
+
+    One budget is spent across the whole sweep rather than given to each frame,
+    because the number of frames is the page's choice as much as the size of an
+    error is: a ceiling every frame is handed separately is one the page
+    multiplies, and 21 frames at that ceiling cost a single sweep 6.9 s and
+    116 MB to keep the 500 items one frame already yields. A frame is asked for
+    what the frames before it left, so a sweep that has its fill reads the rest
+    of the page for its counts alone.
+    """
     outputs = 0
-    output_errors: list[str] = []
+    output_errors: list[_Said] = []
+    total = 0
     shiny_detected = False
     for frame in frames:
         try:
-            scan = frame.evaluate(_FRAME_SCAN)
+            scan = frame.evaluate(_FRAME_SCAN, _MAX_RETAINED_ITEMS - len(output_errors))
         except PlaywrightError:
             continue  # the frame detached or is still navigating
         outputs += scan["rendered"]
-        output_errors.extend(scan["errors"])
+        total += scan["errorTotal"]
+        for error in scan["errors"]:
+            # The budget and the slice are what a frame is ASKED for; these lines
+            # are what it is held to. The script doing the cutting runs in the
+            # page's context, where the page may replace anything it is built
+            # from, so the object that comes back is composed by the thing being
+            # judged and neither ceiling can be enforced by the asking alone.
+            # Both are repeated here for the reason `_printable` repeats its own:
+            # a bound that exists in one place only is one oversight away from
+            # not existing. Stopping rather than skipping, so that a frame
+            # answering with more than the sweep will keep is not read to the end
+            # of what it chose to hand over.
+            if len(output_errors) >= _MAX_RETAINED_ITEMS:
+                break
+            text, written = error["text"], error["length"]
+            # A frame that reports no length is saying it handed the message over
+            # whole, and the length of what arrived is then the true one and is
+            # measured on this side. A frame that says so untruthfully is answered
+            # by the cut below: whatever it kept back is described at the size that
+            # reaches here, so its own claim cannot make an error look shorter than
+            # the part being reported.
+            if written is None:
+                written = len(text)
+                exact = True  # counted here, in the units the verdict is read in
+            else:
+                # Absent as well as false: a frame answering in a shape this does
+                # not recognise has not said the size is a character count, and a
+                # size reported as a bound is wrong by less than one reported as a
+                # count.
+                exact = bool(error.get("exact"))
+            output_errors.append(_Said(text[:_MAX_SCANNED_CHARS], written, exact=exact))
         shiny_detected = shiny_detected or bool(scan["runtime"] or scan["bound"] or scan["inputs"])
-    return _Scan(outputs=outputs, output_errors=output_errors, shiny_detected=shiny_detected)
+    return _Scan(
+        outputs=outputs,
+        output_errors=_Bucket(output_errors, total),
+        shiny_detected=shiny_detected,
+    )
 
 
 def _scan_expects(frames: list[Frame], expect_state: dict[str, bool]) -> None:

@@ -24,11 +24,50 @@ import pytest
 from conftest import run_cli
 from playwright.sync_api import sync_playwright
 
-from shinylive_check.check import _FRAME_SCAN
+from shinylive_check.check import (
+    _FRAME_SCAN,
+    _FRAME_SCAN_INIT,
+    _MAX_RETAINED_ITEMS,
+    _MAX_SCANNED_CHARS,
+)
 
 pytestmark = pytest.mark.browser
 
 RENDERED = '<div class="shiny-bound-output" id="one">ready</div>'
+
+# Replaces both methods the scan uses to add to the list it hands back, so that
+# only methods taken before this page ran can hold the count to what was asked
+# for. An indexed assignment consults the prototype chain when the index is
+# absent, which is what the setter is for; `defineProperty` is what bypasses that
+# setter, which is why it is replaced too.
+#
+# Each override is narrowed to the object the scan builds. A blanket one is not a
+# harder test, it is a broken one: it fires on every array the browser and the
+# driver build for themselves, and the page dies before the scan is reached.
+INTERCEPTING = (
+    "<script>"
+    "  const mine = (v) => v && typeof v === 'object' && 'text' in v && 'length' in v;"
+    "  const define = Object.defineProperty;"
+    "  const flood = function (target, value) {"
+    "    for (let i = 0; i < 50000; i++) {"
+    "      define(target, i, {value: value, writable: true, enumerable: true,"
+    "                         configurable: true});"
+    "    }"
+    "  };"
+    "  define(Array.prototype, '0', {"
+    "    configurable: true,"
+    "    get: function () { return undefined; },"
+    "    set: function (v) {"
+    "      if (mine(v)) { flood(this, v); return; }"
+    "      define(this, 0, {value: v, writable: true, enumerable: true, configurable: true});"
+    "    },"
+    "  });"
+    "  Object.defineProperty = function (target, key, desc) {"
+    "    if (desc && mine(desc.value)) { flood(target, desc.value); return target; }"
+    "    return define(target, key, desc);"
+    "  };"
+    "</script>"
+)
 
 
 def page(tmp_path: Path, body: str, name: str = "site") -> Path:
@@ -915,17 +954,383 @@ def test_a_screenshot_that_cannot_be_written_does_not_mask_the_verdict(tmp_path)
 
 def test_the_frame_scan_script_is_valid_and_returns_its_documented_shape(tmp_path):
     """The scan is a JS blob evaluated in every frame; a typo in it degrades to a
-    timeout that blames the app. This fails on the blob itself instead."""
+    timeout that blames the app. This fails on the blob itself instead.
+
+    A null length is a message handed over whole, which is what an error this
+    short is; the test below is the same field when the page did cut. Nothing was
+    cut here, so the length that is not reported is not a bound either.
+    """
     site = page(tmp_path, RENDERED + '<div class="shiny-bound-output shiny-output-error">bad</div>')
     with sync_playwright() as p:
         browser = p.chromium.launch()
         try:
             tab = browser.new_page()
             tab.goto((site / "index.html").as_uri())
-            scan = tab.evaluate(_FRAME_SCAN)
+            scan = tab.evaluate(_FRAME_SCAN, _MAX_RETAINED_ITEMS)
         finally:
             browser.close()
-    assert scan == {"bound": 2, "inputs": 0, "rendered": 1, "errors": ["bad"], "runtime": False}
+    assert scan == {
+        "bound": 2,
+        "inputs": 0,
+        "rendered": 1,
+        "errors": [{"text": "bad", "length": None, "exact": True}],
+        "errorTotal": 1,
+        "runtime": False,
+    }
+
+
+def test_a_frame_hands_over_a_bounded_head_of_everything_it_counted(tmp_path):
+    """An app decides how many outputs fail and how much each one says.
+
+    Every character of that used to cross the browser connection so that fifty of
+    them could be printed, which is a page choosing what a scan costs - and a scan
+    runs twice a second for the length of the check. Both dimensions are bounded
+    and both are checked, on separate pages so that neither assertion can be
+    satisfied by the other bound: many errors, then one enormous one.
+
+    The counting stays whole either way, because `output_errors_total` is the
+    number a reader is told to trust, and each error carries the length it was cut
+    from so the verdict still reports how big it was.
+    """
+    long_text = "L" * (_MAX_SCANNED_CHARS + 5_000)
+    many = page(
+        tmp_path,
+        '<div class="shiny-output-error">e</div>' * (_MAX_RETAINED_ITEMS + 25),
+        name="many-errors",
+    )
+    huge = page(
+        tmp_path,
+        f'<div class="shiny-output-error">{long_text}</div>',
+        name="one-huge-error",
+    )
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        try:
+            tab = browser.new_page()
+            tab.goto((many / "index.html").as_uri())
+            counted = tab.evaluate(_FRAME_SCAN, _MAX_RETAINED_ITEMS)
+            tab.goto((huge / "index.html").as_uri())
+            enormous = tab.evaluate(_FRAME_SCAN, _MAX_RETAINED_ITEMS)
+        finally:
+            browser.close()
+
+    assert counted["errorTotal"] == _MAX_RETAINED_ITEMS + 25, "the count has to stay whole"
+    assert len(counted["errors"]) == _MAX_RETAINED_ITEMS
+
+    assert enormous["errorTotal"] == 1
+    assert len(enormous["errors"][0]["text"]) == _MAX_SCANNED_CHARS
+    assert enormous["errors"][0]["length"] == len(long_text), "cut, but reported at its real size"
+
+
+def test_a_page_cannot_grow_the_list_it_is_handing_over_past_what_was_asked_for(tmp_path):
+    """How many errors come back is the one thing the script has to keep from the page.
+
+    The scan runs in the page's own context, so the page may replace what it is
+    built from. Appending with `push` let it replace exactly that: the room left is
+    checked before the call, and one overridden call appends as many times as it
+    likes afterwards. A million entries for the five hundred asked for cost 4.3 s
+    of a boot's budget crossing the browser connection, which is a page choosing
+    how long the tool waits for it.
+
+    Assigning at the index instead leaves nothing to override. A page can still
+    define a setter on the prototype and swallow the assignment, but that leaves
+    the list shorter rather than longer, which is only the page hiding its own
+    errors - something a page has always been able to do by not reporting them.
+
+    The override is narrowed to the scan's own objects because a blanket one
+    inflates every array the browser itself appends to and crashes the tab before
+    the scan returns.
+    """
+    hostile = page(
+        tmp_path,
+        '<div class="shiny-output-error">boom</div>'
+        "<script>"
+        "  const orig = Array.prototype.push;"
+        "  Array.prototype.push = function (v) {"
+        '    if (v && typeof v === "object" && "text" in v && "length" in v) {'
+        "      for (let i = 0; i < 50000; i++) { orig.call(this, v); }"
+        "      return this.length;"
+        "    }"
+        "    return orig.apply(this, arguments);"
+        "  };"
+        "</script>",
+        name="inflating-page",
+    )
+    honest = page(tmp_path, '<div class="shiny-output-error">boom</div>', name="honest-page")
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        try:
+            tab = browser.new_page()
+            tab.goto((honest / "index.html").as_uri())
+            plain = tab.evaluate(_FRAME_SCAN, _MAX_RETAINED_ITEMS)
+            tab.goto((hostile / "index.html").as_uri())
+            inflated = tab.evaluate(_FRAME_SCAN, _MAX_RETAINED_ITEMS)
+        finally:
+            browser.close()
+
+    assert len(plain["errors"]) == 1, "the control: this page has one error and reports one"
+    assert len(inflated["errors"]) <= _MAX_RETAINED_ITEMS
+    assert plain["errors"] == inflated["errors"][:1], "and the error itself is unchanged"
+
+
+def test_a_page_cannot_widen_the_cut_by_replacing_the_method_that_cuts(tmp_path):
+    """The cut is only worth what the method doing it is worth.
+
+    `slice` belongs to the page like everything else the script is built from, so
+    a page that replaces it with one returning the whole string is handed the cut
+    it was supposed to be held to. Measured on the real command against the same
+    page checked honestly, that override alone cost 12.0 s and 3183 MB where the
+    honest reading of it cost 3.8 s and 1117 MB, which is the pathology the bound
+    was written to remove, reached through the bound itself.
+
+    The methods that cut and that append are therefore taken before the page runs
+    at all, and kept where the page cannot reach them. The init script is the same
+    constant the command installs, so this exercises what production does rather
+    than a description of it.
+    """
+    huge = _MAX_SCANNED_CHARS * 10
+    hostile = page(
+        tmp_path,
+        '<div class="shiny-output-error" id="e">seed</div>'
+        "<script>"
+        f'  document.getElementById("e").textContent = "X".repeat({huge});'
+        "  const orig = String.prototype.slice;"
+        "  String.prototype.slice = function (a, b) {"
+        "    if (this.length > 1000) { return this.valueOf(); }"
+        "    return orig.call(this, a, b);"
+        "  };"
+        "</script>",
+        name="wide-cut-page",
+    )
+    honest = page(tmp_path, '<div class="shiny-output-error">boom</div>', name="narrow-cut-page")
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        try:
+            tab = browser.new_page()
+            tab.add_init_script(_FRAME_SCAN_INIT)
+            tab.goto((honest / "index.html").as_uri())
+            plain = tab.evaluate(_FRAME_SCAN, _MAX_RETAINED_ITEMS)
+            tab.goto((hostile / "index.html").as_uri())
+            widened = tab.evaluate(_FRAME_SCAN, _MAX_RETAINED_ITEMS)
+        finally:
+            browser.close()
+
+    assert plain["errors"][0]["text"] == "boom", "the control: an honest page is cut normally"
+    assert plain["errors"][0]["length"] is None, "and is handed over whole"
+
+    assert len(widened["errors"][0]["text"]) == _MAX_SCANNED_CHARS
+    assert widened["errors"][0]["length"] == huge, "cut, and reported at its real size"
+
+
+def test_a_page_cannot_widen_the_cut_by_poisoning_how_the_cut_is_invoked(tmp_path):
+    """Taking the method is not keeping it if it is reached through a property.
+
+    Freezing the object the captured methods sit on freezes the references, not
+    the functions they point to, and a function is an ordinary mutable object
+    whose `call` is an inherited property the page may give it an own copy of.
+    The page below leaves `String.prototype.slice` alone, so the captured method
+    is still the real one, and poisons only the way it was being invoked.
+
+    The cut is therefore invoked, not looked up: a slicer bound while the page
+    had not yet run is called directly, and a direct call consults no property
+    the page can reach.
+    """
+    huge = _MAX_SCANNED_CHARS * 10
+    hostile = page(
+        tmp_path,
+        '<div class="shiny-output-error" id="e">seed</div>'
+        "<script>"
+        f'  document.getElementById("e").textContent = "X".repeat({huge});'
+        "  const orig = String.prototype.slice;"
+        "  const realCall = Function.prototype.call;"
+        "  orig.call = function (that, a, b) {"
+        "    if (typeof that === 'string' && that.length > 1000) { return that; }"
+        "    return realCall.call(orig, that, a, b);"
+        "  };"
+        "</script>",
+        name="poisoned-call",
+    )
+    honest = page(tmp_path, '<div class="shiny-output-error">boom</div>', name="clean-call")
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        try:
+            tab = browser.new_page()
+            tab.add_init_script(_FRAME_SCAN_INIT)
+            tab.goto((honest / "index.html").as_uri())
+            plain = tab.evaluate(_FRAME_SCAN, _MAX_RETAINED_ITEMS)
+            tab.goto((hostile / "index.html").as_uri())
+            widened = tab.evaluate(_FRAME_SCAN, _MAX_RETAINED_ITEMS)
+        finally:
+            browser.close()
+
+    assert plain["errors"][0]["text"] == "boom", "the control: an honest page is cut normally"
+    assert len(widened["errors"][0]["text"]) == _MAX_SCANNED_CHARS
+    assert widened["errors"][0]["length"] == huge, "cut, and reported at its real size"
+
+
+def test_a_page_cannot_make_a_bound_read_as_a_measurement(tmp_path):
+    """Whether a reported size is a character count is asked with a captured method too.
+
+    `test` does not do the matching. It looks `exec` up on the regex it was handed
+    and calls that, so a page owning `RegExp.prototype.exec` answers the question
+    rather than the regex, and every string it is asked about holds no surrogate
+    pair. The size then reads as a count of characters when it is a count of code
+    units, which is the one thing this field exists to prevent, and the page has
+    the verdict overstating its own error by a factor of two.
+
+    The regex is built before the page runs and given its own `exec` that cannot be
+    replaced, so the lookup one level down lands on the real one. The page below
+    leaves `test` itself alone, and narrows its override to long strings, since a
+    blanket one fires on every regex the page and the driver use and kills the page
+    before the scan reaches it.
+    """
+    huge = _MAX_SCANNED_CHARS * 10
+    hostile = page(
+        tmp_path,
+        '<div class="shiny-output-error" id="e">seed</div>'
+        "<script>"
+        f'  document.getElementById("e").textContent = "\\ud83d\\udca5".repeat({huge});'
+        "  const realExec = RegExp.prototype.exec;"
+        "  RegExp.prototype.exec = function (s) {"
+        "    if (typeof s === 'string' && s.length > 1000) { return null; }"
+        "    return realExec.call(this, s);"
+        "  };"
+        "</script>",
+        name="poisoned-exec",
+    )
+    honest = page(
+        tmp_path,
+        '<div class="shiny-output-error" id="e"></div>'
+        f'<script>document.getElementById("e").textContent = "X".repeat({huge});</script>',
+        name="clean-exec",
+    )
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        try:
+            tab = browser.new_page()
+            tab.add_init_script(_FRAME_SCAN_INIT)
+            tab.goto((honest / "index.html").as_uri())
+            plain = tab.evaluate(_FRAME_SCAN, _MAX_RETAINED_ITEMS)
+            tab.goto((hostile / "index.html").as_uri())
+            widened = tab.evaluate(_FRAME_SCAN, _MAX_RETAINED_ITEMS)
+        finally:
+            browser.close()
+
+    assert plain["errors"][0]["exact"] is True, "the control: text with no pairs is counted exactly"
+    assert widened["errors"][0]["length"] == huge * 2, "code units, which is what a page counts"
+    assert widened["errors"][0]["exact"] is False, "and the page does not get to call that a count"
+
+
+def test_a_page_cannot_grow_the_list_by_intercepting_how_it_is_added_to(tmp_path):
+    """The list is added to through a method taken before the page ran.
+
+    Not appending is not enough on its own. An indexed assignment consults the
+    prototype chain when the index is absent, so a numeric setter on
+    `Array.prototype` runs in place of the assignment and can define as many
+    indices as it likes on the array it was handed; and the method that would
+    bypass that setter is `Object.defineProperty`, which is the page's to replace
+    too. This page does both, so only the captured method can hold the count.
+    """
+    hostile = page(
+        tmp_path, '<div class="shiny-output-error">boom</div>' + INTERCEPTING, name="intercepting"
+    )
+    honest = page(tmp_path, '<div class="shiny-output-error">boom</div>', name="plain-page")
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        try:
+            tab = browser.new_page()
+            tab.add_init_script(_FRAME_SCAN_INIT)
+            tab.goto((honest / "index.html").as_uri())
+            plain = tab.evaluate(_FRAME_SCAN, _MAX_RETAINED_ITEMS)
+            tab.goto((hostile / "index.html").as_uri())
+            intercepted = tab.evaluate(_FRAME_SCAN, _MAX_RETAINED_ITEMS)
+        finally:
+            browser.close()
+
+    assert len(plain["errors"]) == 1, "the control: one error, reported once"
+    assert len(intercepted["errors"]) == 1, "and one error stays one error"
+    assert intercepted["errors"] == plain["errors"], "unchanged, not merely uncounted"
+
+
+def test_the_command_itself_takes_the_scan_s_methods_before_the_page_runs(tmp_path):
+    """The two tests above install the capture themselves, so neither of them
+    would notice the command no longer installing it.
+
+    What that costs is visible in the verdict rather than only in the memory: the
+    page below holds one failed output and says so, and a scan whose count it can
+    grow returns that one error fifty thousand times over. The list and the total
+    then disagree, and the report prints the same line fifty times under a count
+    of one.
+    """
+    failed = '<div class="shiny-bound-output shiny-output-error">boom</div>'
+    hostile = page(tmp_path, failed + INTERCEPTING, name="unarmed")
+    honest = page(tmp_path, failed, name="armed")
+
+    for site, label in ((honest, "control"), (hostile, "intercepting")):
+        proc = run_cli(str(site), "--timeout", "20", "-o", "json")
+        assert proc.returncode != 0, f"{label}: a failed output should fail the check"
+        verdict = json.loads(proc.stdout)
+        assert verdict["output_errors"] == ["boom"], f"{label}: {verdict['output_errors'][:3]}"
+        assert verdict["output_errors_total"] == 1, label
+
+
+def test_an_error_the_page_never_cut_is_not_reported_as_truncated(tmp_path):
+    """An emoji in a failed output is one character here and two in the browser.
+
+    A JavaScript string is measured in UTF-16 code units and a Python one in code
+    points, so an astral character is 2 on the way out of the page and 1 on the way
+    in. Reporting a length for text that was never cut made that difference look
+    like the difference the length is there to describe, and the verdict told a
+    reader that a message it had shown whole went on for characters that were
+    never written. The page reports a length when it cuts, which is what a length
+    was always for.
+
+    The emoji is an entity so that this fixture means the same thing whatever
+    encoding the file is written in.
+    """
+    site = page(tmp_path, '<div class="shiny-bound-output shiny-output-error">boom &#128165;</div>')
+    proc = run_cli(str(site), "--timeout", "20", "-o", "json")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    verdict = json.loads(proc.stdout)
+    assert verdict["failure"] == "output-error"
+    assert verdict["output_errors"] == ["boom \U0001f4a5"]
+
+
+def test_a_cut_error_never_states_a_size_the_page_cannot_vouch_for(tmp_path):
+    """The size a cut is reported at is a count of code units, not of characters.
+
+    The page cuts a long error and hands over how long it was, because this side
+    can no longer measure what it was never sent. That number is in UTF-16 code
+    units, and a verdict is read in characters: 40,000 emoji are 80,000 units, so
+    the reader was told the message ran to twice the length anyone had written.
+
+    Counting the characters instead is what the cut exists to avoid, since it walks
+    the whole string the page chose the length of. Asking whether the count is a
+    character count is free, because a surrogate pair is the only thing that makes
+    the two differ and one regex answers it without allocating. So the number is
+    still reported, as the bound it actually is, and stays exact for the text that
+    has no pairs in it.
+
+    The emoji is written as an escape so that this fixture means the same thing
+    whatever encoding the file is saved in.
+    """
+    characters = _MAX_SCANNED_CHARS * 2
+
+    def reported(expression: str) -> str:
+        body = (
+            '<div class="shiny-bound-output shiny-output-error" id="e"></div>'
+            f'<script>document.getElementById("e").textContent = {expression};</script>'
+        )
+        site = page(tmp_path, body, name=f"site-{abs(hash(expression))}")
+        proc = run_cli(str(site), "--timeout", "30", "-o", "json")
+        assert proc.returncode == 1, proc.stdout + proc.stderr
+        return json.loads(proc.stdout)["output_errors"][0]
+
+    plain = reported(f'"L".repeat({characters})')
+    assert plain.endswith(f"... [truncated, {characters} characters total]"), plain
+
+    astral = reported(f'"\\ud83d\\udca5".repeat({characters})')
+    assert astral.endswith(f"... [truncated, at most {characters * 2} characters total]"), astral
 
 
 def test_a_verdict_too_big_for_the_pipe_does_not_become_a_bug_report(tmp_path):
