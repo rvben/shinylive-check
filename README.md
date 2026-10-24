@@ -39,6 +39,20 @@ Any of these leaves the page a permanent spinner while every server-side signal 
 
 ## Install
 
+### Homebrew
+
+```sh
+brew install rvben/tap/shinylive-check
+```
+
+Install Chromium once after installing the formula:
+
+```sh
+"$(brew --prefix shinylive-check)/libexec/bin/playwright" install chromium
+```
+
+### Other installation methods
+
 ```sh
 uv tool install shinylive-check   # or: pip install shinylive-check
 playwright install chromium       # once, the browser it drives
