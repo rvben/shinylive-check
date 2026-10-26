@@ -21,7 +21,9 @@ def fetch(url: str) -> tuple[int, str]:
         with urllib.request.urlopen(url, timeout=10) as response:
             return response.status, response.read().decode(errors="replace")
     except urllib.error.HTTPError as err:
-        return err.code, ""
+        # HTTPError owns the response too, so close it before returning.
+        with err:
+            return err.code, ""
 
 
 def export_with_symlink(tmp_path: Path) -> Path:
