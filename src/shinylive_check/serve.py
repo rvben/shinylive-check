@@ -10,6 +10,13 @@ from pathlib import Path
 from typing import BinaryIO
 
 
+class _ExportServer(ThreadingHTTPServer):
+    # Pyodide fetches many packages together during a cold boot. The default
+    # queue of five resets connections under that burst on macOS, making a
+    # healthy export fail before its runtime can start.
+    request_queue_size = 128
+
+
 class _QuietHandler(SimpleHTTPRequestHandler):
     """Serves the export and nothing else, silently.
 
@@ -62,6 +69,6 @@ def serve_directory(directory: Path, port: int = 0) -> tuple[ThreadingHTTPServer
     URL they were exported for.
     """
     handler = partial(_QuietHandler, directory=str(directory))
-    server = ThreadingHTTPServer(("127.0.0.1", port), handler)
+    server = _ExportServer(("127.0.0.1", port), handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server, f"http://127.0.0.1:{server.server_address[1]}/"

@@ -7,8 +7,11 @@ So the server must serve the export and nothing else on the host.
 
 from __future__ import annotations
 
+import socket
+import threading
 import urllib.error
 import urllib.request
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -157,3 +160,43 @@ def test_a_directory_index_symlink_inside_the_export_still_works(tmp_path, index
         server.server_close()
     assert status == 200
     assert body == "inside index"
+
+
+def test_a_cold_export_can_queue_a_burst_of_package_connections(tmp_path, monkeypatch):
+    # A cold Pyodide boot opens many package connections together. Hold the
+    # accept loop until the burst arrives, rather than relying on a timing race.
+    ready = threading.Event()
+    original = ThreadingHTTPServer.serve_forever
+
+    def paused(server, poll_interval=0.5):
+        ready.wait(timeout=10)
+        original(server, poll_interval=poll_interval)
+
+    monkeypatch.setattr(ThreadingHTTPServer, "serve_forever", paused)
+    (tmp_path / "index.html").write_text("export")
+    server, _ = serve_directory(tmp_path)
+    clients = []
+    failures = []
+    try:
+        for _ in range(16):
+            try:
+                clients.append(
+                    socket.create_connection(("127.0.0.1", server.server_port), timeout=0.1)
+                )
+            except OSError as err:
+                failures.append(str(err))
+        ready.set()
+        for client in clients:
+            client.settimeout(5)
+            client.sendall(b"GET /index.html HTTP/1.0\r\nHost: localhost\r\n\r\n")
+        for client in clients:
+            with client.makefile("rb") as response:
+                assert b" 200 " in response.readline()
+                assert response.read().endswith(b"export")
+    finally:
+        ready.set()
+        for client in clients:
+            client.close()
+        server.shutdown()
+        server.server_close()
+    assert not failures, f"cold-boot connections were dropped: {failures}"

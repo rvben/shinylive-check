@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Give cold exports enough queued loopback connections for Pyodide's burst of
+  package downloads. The default server queue reset connections on macOS,
+  causing healthy apps to fail boot with preload errors.
+
 ## [0.2.0](https://github.com/rvben/shinylive-check/compare/v0.1.0...v0.2.0) - 2026-10-26
 
 ### Added
