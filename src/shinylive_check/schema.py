@@ -76,7 +76,9 @@ _VERDICT_FIELDS = [
     {
         "name": "resource_errors_total",
         "type": "integer",
-        "description": "Failed resource loads, which may exceed len(resource_errors)",
+        "description": (
+            "Failed resource requests, including retries; may exceed len(resource_errors)"
+        ),
     },
     {
         "name": "ignored_errors",

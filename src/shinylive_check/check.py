@@ -717,7 +717,14 @@ def run_check(
             def on_request_failed(request: Request) -> None:
                 # An error status was already recorded on response. A failed
                 # response body must not count the same request a second time.
-                response = request.response()
+                if request.failure == "net::ERR_ABORTED":
+                    return  # deliberate cancellation is not a broken resource
+                try:
+                    response = request.response()
+                except PlaywrightError:
+                    # Teardown may close the protocol before the response can be
+                    # read; the requestfailed event still establishes a failure.
+                    response = None
                 if response is None or response.status < 400:
                     heard.load_failed(request.url)
 

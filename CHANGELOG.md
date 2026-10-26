@@ -52,8 +52,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   requests, so an `index.html` or `index.htm` symlink cannot serve a file outside
   the export through a directory URL.
 - Failed network requests are counted independently of console errors, including
-  worker fetches that Chromium does not report to the page console. Strict
-  resource checks now reject these failures, and retain bounded diagnostics.
+  dedicated-worker fetches that Chromium does not report to the page console. Strict
+  resource checks now reject these failures, and retain bounded diagnostics
+  containing the failed URL and HTTP status when available. Totals count failed
+  requests, including retries, rather than console messages.
 - The schema example supplies arguments relative to its command, so conformance
   tools can invoke it without repeating `check`.
 

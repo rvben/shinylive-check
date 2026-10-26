@@ -1404,3 +1404,40 @@ worker.onmessage = () => {
     assert verdict["failure"] == "resource-error", verdict
     assert verdict["resource_errors_total"] >= 1
     assert "missing-data.json" in " ".join(verdict["resource_errors"])
+
+
+def test_a_deliberately_aborted_fetch_does_not_fail_strict_resource_checks(tmp_path):
+    hole = _Blackhole()
+    try:
+        site = page(
+            tmp_path,
+            RENDERED
+            + f"""
+<script>
+const controller = new AbortController();
+fetch('http://127.0.0.1:{hole.port}/never', {{signal: controller.signal}})
+    .catch(() => {{
+        const ready = document.createElement('div');
+        ready.id = 'abort-done';
+        ready.textContent = 'cancelled deliberately';
+        document.body.appendChild(ready);
+    }});
+setTimeout(() => controller.abort(), 100);
+</script>
+""",
+            name="aborted-fetch",
+        )
+        proc = run_cli(
+            str(site),
+            "--expect",
+            "#abort-done",
+            "--fail-on-resource-error",
+            "--timeout",
+            "20",
+            "-o",
+            "json",
+        )
+    finally:
+        hole.close()
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert json.loads(proc.stdout)["resource_errors_total"] == 0
