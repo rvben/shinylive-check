@@ -251,6 +251,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gigabyte resident.
 
 - enforce export boundaries and strict resource checks ([da3aed2](https://github.com/rvben/shinylive-check/commit/da3aed20f93bdee40ec736adc96cc83d0e574e40))
+- **check**: exclude intentional request cancellations from resource errors ([d9446b7](https://github.com/rvben/shinylive-check/commit/d9446b72202ad04a25fb0b0f3d277f7567d31a35))
 
 
 ## [0.1.0] - 2026-08-20
