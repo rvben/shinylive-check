@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/rvben/shinylive-check/compare/v0.1.0...v0.2.0) - 2026-10-26
+
 ### Added
 
 - Exit code 5 and a matching `internal` error kind for a failure in the tool
@@ -236,6 +238,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tool's, since it retains every console message for the life of the page:
   measured with this check keeping nothing at all, the same flood still reached a
   gigabyte resident.
+
+- **serve**: refuse a symlink loop instead of killing the handler thread ([d8e6def](https://github.com/rvben/shinylive-check/commit/d8e6deff0d6cb4b955445fd9aff9980b1f4ec9da))
+- **cli**: reject a --timeout that is not a finite number of seconds ([a39dd85](https://github.com/rvben/shinylive-check/commit/a39dd858da1e33dd57f190a462dfa52405c6563e))
+- bound the verdict in encoded bytes, not characters ([412b699](https://github.com/rvben/shinylive-check/commit/412b69940be83e8392f614814675656ac3f9943e))
 
 ## [0.1.0] - 2026-08-20
 

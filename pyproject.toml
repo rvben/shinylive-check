@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "shinylive-check"
-version = "0.1.0"
+version = "0.2.0"
 description = "Smoke-check an exported Shinylive site in headless Chromium: fail CI on boot failures, console errors and unrendered outputs."
 readme = "README.md"
 requires-python = ">=3.10"
