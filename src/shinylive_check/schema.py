@@ -218,7 +218,7 @@ SCHEMA = {
             # Self-contained probe for conformance tooling: a refused loopback
             # connection produces a normal failure verdict (the check_failed
             # outcome) instantly, without needing a real shinylive export.
-            "example": {"args": ["check", "http://127.0.0.1:1/", "--timeout", "5"]},
+            "example": {"args": ["http://127.0.0.1:1/", "--timeout", "5"]},
         },
         {
             "name": "schema",

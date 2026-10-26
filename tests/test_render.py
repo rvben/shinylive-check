@@ -791,3 +791,23 @@ def test_the_heartbeat_reports_no_more_often_than_its_interval():
     for elapsed in (0.5, 5.0, 14.9, 15.0, 20.0, 30.0):
         report(elapsed)
     assert written == ["still waiting (15s elapsed)\n", "still waiting (30s elapsed)\n"]
+
+
+def test_failed_loads_are_counted_without_console_messages_and_retained_with_a_bound():
+    heard = _Heard()
+    for index in range(20_000):
+        heard.load_failed(f"http://127.0.0.1/missing-{index}.json", 404)
+    resources = heard.resources()
+    assert resources.total == 20_000
+    assert len(resources.items) == _MAX_REPORTED_ITEMS
+    assert "missing-0.json" in resources.items[0].text
+    scan = _Scan(outputs=1, output_errors=_Bucket([], 0), shiny_detected=True)
+    assert _fault(heard, scan, strict=False) is None
+    assert _fault(heard, scan, strict=True) == "resource-error"
+
+
+def test_repeated_failed_attempts_are_counted_without_requiring_distinct_urls():
+    heard = _Heard()
+    for _ in range(3):
+        heard.load_failed("http://127.0.0.1/retry.json", 404)
+    assert heard.resources().total == 3

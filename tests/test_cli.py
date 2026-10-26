@@ -195,7 +195,7 @@ def test_schema_is_a_valid_clispec_contract():
     assert check["cardinality"] == "single"
     # The example lets conformance tooling exercise the command without a real
     # export: a refused loopback connection is an instant, deterministic verdict.
-    assert check["example"]["args"][0] == "check"
+    assert check["example"]["args"][0] == "http://127.0.0.1:1/"
     fields = {field["name"] for field in check["output_fields"]}
     assert fields >= {"target", "ok", "url", "seconds", "outputs", "errors", "failure"}
     kinds = {error["kind"]: error["exit_code"] for error in schema["errors"]}
@@ -353,3 +353,16 @@ def test_check_subcommand_is_an_alias_for_the_bare_target(tmp_path):
     bare = run_cli(str(tmp_path))
     spelled = run_cli("check", str(tmp_path))
     assert bare.returncode == spelled.returncode == 2
+
+
+def test_the_declared_example_can_be_invoked_after_its_command(tmp_path):
+    check = next(command for command in SCHEMA["commands"] if command["name"] == "check")
+    # A missing browser makes this independent of any installed Chromium. The
+    # example must reach the check, rather than fail parsing as a usage error.
+    proc = run_cli(
+        check["name"],
+        *check["example"]["args"],
+        env={"PLAYWRIGHT_BROWSERS_PATH": str(tmp_path / "no-browser")},
+    )
+    assert proc.returncode == 4, proc.stdout + proc.stderr
+    assert json.loads(proc.stderr.splitlines()[-1])["error"]["kind"] == "unavailable"

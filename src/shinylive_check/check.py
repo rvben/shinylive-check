@@ -16,7 +16,7 @@ import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from playwright.sync_api import ConsoleMessage, Frame, Page, Response, sync_playwright
+from playwright.sync_api import ConsoleMessage, Frame, Page, Request, Response, sync_playwright
 from playwright.sync_api import Error as PlaywrightError
 
 
@@ -499,6 +499,11 @@ class _Heard:
         # error status are both failed loads, and only one of them produces a
         # response.
         self._failed: set[bytes] = set()
+        # Network failures are the evidence, even when a worker's failed fetch
+        # produces no console message. Keep only the diagnostics we can print;
+        # count every failed attempt without retaining its URL indefinitely.
+        self._load_total = 0
+        self._load_messages: list[_Said] = []
         # Whether the set above is all of them. Once it is not, a URL missing from
         # it no longer means the load did not fail, so the match it backs stops
         # being evidence and every classification that would have leant on it is
@@ -515,7 +520,14 @@ class _Heard:
         # was expensive, and the text is still dropped.
         self._unsettled: dict[tuple[bytes, bool], int] = {}
 
-    def load_failed(self, url: str) -> None:
+    def load_failed(self, url: str, status: int | None = None) -> None:
+        self._load_total += 1
+        if len(self._load_messages) < _MAX_REPORTED_ITEMS:
+            prefix = "Failed to load resource: "
+            if status is not None:
+                prefix += f"HTTP {status}: "
+            text = prefix + url[:_MAX_SCANNED_CHARS]
+            self._load_messages.append(_Said(text, len(prefix) + len(url), from_page=False))
         key = _load_key(url)
         if len(self._failed) < _MAX_TRACKED_LOADS:
             self._failed.add(key)
@@ -523,6 +535,10 @@ class _Heard:
             # One already remembered costs nothing to drop, and a page failing the
             # same load repeatedly is the ordinary shape of a retry loop.
             self._loads_complete = False
+
+    def resources(self) -> _Bucket:
+        """Failed network attempts, independent of console diagnostics."""
+        return _Bucket(self._load_messages, self._load_total)
 
     def said(self, text: str, origin: str | None = None, *, from_page: bool = True) -> None:
         key = None if origin is None else _load_key(origin)
@@ -653,7 +669,8 @@ def run_check(
     ) -> CheckResult:
         state = expect_state or dict.fromkeys(expects, False)
         page_errors = output_errors or _Bucket([], 0)
-        app_errors, resource_errors, ignored_errors = heard.buckets()
+        app_errors, _, ignored_errors = heard.buckets()
+        resource_errors = heard.resources()
         return CheckResult(
             ok=ok,
             url=url,
@@ -695,11 +712,18 @@ def run_check(
 
             def on_response(response: Response) -> None:
                 if response.status >= 400:
-                    heard.load_failed(response.url)
+                    heard.load_failed(response.url, response.status)
+
+            def on_request_failed(request: Request) -> None:
+                # An error status was already recorded on response. A failed
+                # response body must not count the same request a second time.
+                response = request.response()
+                if response is None or response.status < 400:
+                    heard.load_failed(request.url)
 
             page.on("pageerror", lambda err: heard.said(f"pageerror: {err}"))
             page.on("console", on_console)
-            page.on("requestfailed", lambda request: heard.load_failed(request.url))
+            page.on("requestfailed", on_request_failed)
             page.on("response", on_response)
 
             _validate_selectors(page, expects)
@@ -867,12 +891,12 @@ def _fault(heard: _Heard, scan: _Scan, *, strict: bool) -> str | None:
     counted without being kept and a verdict must not turn on which of its errors
     were the ones retained.
     """
-    app_errors, resource_errors, _ = heard.buckets()
+    app_errors, _, _ = heard.buckets()
     if app_errors.total:
         return "error"
     if scan.output_errors.total:
         return "output-error"
-    if strict and resource_errors.total:
+    if strict and heard.resources().total:
         return "resource-error"
     return None
 

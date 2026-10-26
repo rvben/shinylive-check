@@ -1368,3 +1368,39 @@ def test_a_verdict_too_big_for_the_pipe_does_not_become_a_bug_report(tmp_path):
     assert tool.returncode == 141, f"exited {tool.returncode}\n{stderr}"
     assert "Traceback" not in stderr, stderr
     assert "bug in shinylive-check" not in stderr, stderr
+
+
+def test_strict_resource_checks_include_worker_fetch_failures(tmp_path):
+    site = page(
+        tmp_path,
+        RENDERED
+        + """
+<script>
+const source = `fetch(${JSON.stringify(location.origin + '/missing-data.json')})
+    .then(() => postMessage('done'));`;
+const worker = new Worker(URL.createObjectURL(new Blob([source], {type: 'text/javascript'})));
+worker.onmessage = () => {
+    const ready = document.createElement('div');
+    ready.id = 'worker-done';
+    ready.textContent = 'done';
+    document.body.appendChild(ready);
+};
+</script>
+""",
+        name="worker-fetch",
+    )
+    proc = run_cli(
+        str(site),
+        "--expect",
+        "#worker-done",
+        "--fail-on-resource-error",
+        "--timeout",
+        "20",
+        "-o",
+        "json",
+    )
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    verdict = json.loads(proc.stdout)
+    assert verdict["failure"] == "resource-error", verdict
+    assert verdict["resource_errors_total"] >= 1
+    assert "missing-data.json" in " ".join(verdict["resource_errors"])

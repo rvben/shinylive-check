@@ -48,6 +48,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Directory index files follow the same containment checks as direct file
+  requests, so an `index.html` or `index.htm` symlink cannot serve a file outside
+  the export through a directory URL.
+- Failed network requests are counted independently of console errors, including
+  worker fetches that Chromium does not report to the page console. Strict
+  resource checks now reject these failures, and retain bounded diagnostics.
+- The schema example supplies arguments relative to its command, so conformance
+  tools can invoke it without repeating `check`.
+
 - A page whose main thread stopped answering was never judged at all. Reading the
   page is the one thing the check cannot do on its own clock: `evaluate` is the
   only playwright call that takes no timeout, so an app running an infinite loop,

@@ -28,6 +28,15 @@ class _QuietHandler(SimpleHTTPRequestHandler):
         root = Path(self.directory).resolve()
         try:
             target = Path(self.translate_path(self.path)).resolve()
+            served = target
+            # SimpleHTTPRequestHandler chooses an index after translating a
+            # directory. Validate that file too, before its open follows a link.
+            if target.is_dir():
+                for name in ("index.html", "index.htm"):
+                    candidate = target / name
+                    if candidate.is_file():
+                        served = candidate.resolve()
+                        break
         # A symlink loop is RuntimeError rather than OSError on every Python before
         # 3.13, and an uncaught one kills the handler thread: the connection closes
         # with no reply and the traceback lands on the server's stderr, which reads
@@ -36,7 +45,9 @@ class _QuietHandler(SimpleHTTPRequestHandler):
         except (OSError, RuntimeError):
             self.send_error(404, "File not found")
             return None
-        if target != root and root not in target.parents:
+        if (target != root and root not in target.parents) or (
+            served != root and root not in served.parents
+        ):
             self.send_error(404, "File not found")
             return None
         return super().send_head()

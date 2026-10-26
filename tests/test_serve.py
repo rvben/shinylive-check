@@ -11,6 +11,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+import pytest
+
 from shinylive_check.serve import serve_directory
 
 CANARY = "TOP-SECRET-CANARY"
@@ -121,3 +123,37 @@ def test_parent_traversal_is_not_served(tmp_path):
         server.shutdown()
         server.server_close()
     assert status == 404
+
+
+@pytest.mark.parametrize("directory", ["", "sub"])
+@pytest.mark.parametrize("index_name", ["index.html", "index.htm"])
+def test_a_directory_index_cannot_serve_an_outside_symlink(tmp_path, directory, index_name):
+    site = tmp_path / "site"
+    target = site / directory
+    target.mkdir(parents=True)
+    outside = tmp_path / "secret.txt"
+    outside.write_text(CANARY)
+    (target / index_name).symlink_to(outside)
+    server, url = serve_directory(site)
+    try:
+        status, _ = fetch(url + (directory + "/" if directory else ""))
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert status == 404
+
+
+@pytest.mark.parametrize("index_name", ["index.html", "index.htm"])
+def test_a_directory_index_symlink_inside_the_export_still_works(tmp_path, index_name):
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "real.html").write_text("inside index")
+    (site / index_name).symlink_to(site / "real.html")
+    server, url = serve_directory(site)
+    try:
+        status, body = fetch(url)
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert status == 200
+    assert body == "inside index"
