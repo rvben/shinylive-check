@@ -52,6 +52,7 @@ dev = [
 # change would keep serving the previously built wheel to `uv pip install .`. Key the
 # cache on the shipped source too.
 [tool.uv]
+exclude-newer = "7 days"
 cache-keys = [{ file = "pyproject.toml" }, { file = "src/**/*" }]
 
 [tool.hatch.build.targets.wheel]

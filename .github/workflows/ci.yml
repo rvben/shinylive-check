@@ -12,6 +12,10 @@ on:
 permissions:
   contents: read
 
+env:
+  # Fail instead of silently re-resolving when uv.lock is out of date.
+  UV_LOCKED: "1"
+
 jobs:
   checks:
     name: Python ${{ matrix.python-version }}
